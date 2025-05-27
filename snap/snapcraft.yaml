@@ -1,0 +1,48 @@
+name: lxd-indicator
+base: core22
+version: '0.1'
+summary: LXD instance status indicator
+description: |
+  A simple system tray indicator for displaying the status of LXD instances
+  and performing basic actions.
+grade: stable # Or devel, if preferred for initial releases
+confinement: strict
+
+apps:
+  lxd-indicator:
+    command: bin/lxd-indicator.py
+    extensions:
+      - gnome # Use 'gnome' for core22, not 'gnome-3-38'
+    plugs:
+      - network
+      - gsettings
+      - lxd
+    autostart: lxd-indicator.desktop
+
+parts:
+  lxd-indicator:
+    plugin: python
+    source: . # This will copy lxd-indicator.py and lxd_logo.png
+    python-packages:
+      - pylxd
+    stage-packages:
+      - python3-gi
+      - gir1.2-gtk-3.0
+      - gir1.2-appindicator3-0.1
+      - libappindicator3-1 # Runtime dependency for AppIndicator
+    override-build: |
+      snapcraftctl build
+      # Ensure the script is executable
+      chmod +x $SNAPCRAFT_PART_INSTALL/lxd-indicator.py
+      # The command in apps is 'bin/lxd-indicator.py'.
+      # We need to place the script into a 'bin' directory within the part's install path.
+      mkdir -p $SNAPCRAFT_PART_INSTALL/bin
+      mv $SNAPCRAFT_PART_INSTALL/lxd-indicator.py $SNAPCRAFT_PART_INSTALL/bin/lxd-indicator.py
+
+  # Part for the desktop file
+  desktop-file:
+    plugin: dump
+    source: snap/gui # Directory containing lxd-indicator.desktop
+    organize:
+      'lxd-indicator.desktop': meta/gui/lxd-indicator.desktop
+

@@ -15,8 +15,13 @@ from pylxd.exceptions import ClientConnectionFailed, LXDAPIException, NotFound
 
 APPINDICATOR_ID = 'lxd-status-indicator'
 # Path to the LXD logo icon. Ensure this path is correct.
-# For example, if lxd_logo.png is in the same directory as the script:
-LXD_MAIN_ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lxd_logo.png')
+SNAP_DIR = os.environ.get('SNAP')
+if SNAP_DIR:
+    LXD_MAIN_ICON_PATH = os.path.join(SNAP_DIR, 'lxd_logo.png')
+else:
+    # Fallback for running outside a snap (e.g., during development)
+    # Assumes script is in the project root alongside lxd_logo.png for local dev.
+    LXD_MAIN_ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lxd_logo.png')
 REFRESH_INTERVAL = 10  # seconds
 
 # Freedesktop icon names for instance states
@@ -269,3 +274,4 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     app = LXDIndicatorApp()
     Gtk.main()
+

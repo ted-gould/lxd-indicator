@@ -1,0 +1,9 @@
+Desktop Entry]
+Name=LXD Indicator
+Comment=Shows status of LXD instances
+Exec=lxd-indicator.py
+Icon=${SNAP}/lxd_logo.png
+Terminal=false
+Type=Application
+Categories=Utility;
+X-GNOME-Autostart-enabled=true
