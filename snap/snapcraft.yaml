@@ -42,7 +42,7 @@ parts:
   # Part for the desktop file
   desktop-file:
     plugin: dump
-    source: snap/gui # Directory containing lxd-indicator.desktop
+    source: .. # Source is the parent directory (project root)
     organize:
       'lxd-indicator.desktop': meta/gui/lxd-indicator.desktop
 
