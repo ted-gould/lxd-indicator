@@ -32,17 +32,10 @@ parts:
       - libappindicator3-1 # Runtime dependency for AppIndicator
     override-build: |
       snapcraftctl build
-      # Ensure the script is executable
-      chmod +x $SNAPCRAFT_PART_INSTALL/lxd-indicator.py
       # The command in apps is 'bin/lxd-indicator.py'.
-      # We need to place the script into a 'bin' directory within the part's install path.
+      # We need to p the script into a 'bin' directory within the part's install path.
       mkdir -p $SNAPCRAFT_PART_INSTALL/bin
-      mv $SNAPCRAFT_PART_INSTALL/lxd-indicator.py $SNAPCRAFT_PART_INSTALL/bin/lxd-indicator.py
-
-  # Part for the desktop file
-  desktop-file:
-    plugin: dump
-    source: snap/gui # Directory containing lxd-indicator.desktop
-    organize:
-      'lxd-indicator.desktop': meta/gui/lxd-indicator.desktop
-
+      cp $SNAPCRAFT_PROJECT_DIR/lxd-indicator.py $SNAPCRAFT_PART_INSTALL/bin/lxd-indicator.py
+      # Ensure the script is executable
+      chmod +x $SNAPCRAFT_PART_INSTALL/bin/lxd-indicator.py
+      cp $SNAPCRAFT_PROJECT_DIR/lxd-indicator.desktop $SNAPCRAFT_PART_INSTALL/lxd-indicator.desktop
