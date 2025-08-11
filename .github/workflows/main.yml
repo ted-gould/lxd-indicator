@@ -25,9 +25,13 @@ jobs:
         sudo lxd init --auto
         sudo usermod -a -G lxd $USER
 
+    - name: Pre-install build dependencies
+      run: sudo snap install gtk-common-themes
+
     - name: Build the snap
-      # Build in destructive mode to avoid LXD networking issues in CI.
-      run: snapcraft --destructive-mode
+      # Build in destructive mode and print logs on failure.
+      run: |
+        snapcraft --destructive-mode || (cat /home/runner/.local/state/snapcraft/log/snapcraft-*.log && exit 1)
 
     - name: Install the snap
       run: |
