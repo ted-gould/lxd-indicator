@@ -25,33 +25,9 @@ jobs:
         sudo lxd init --auto
         sudo usermod -a -G lxd $USER
 
-    - name: Debug LXD Network
-      run: |
-        set -ex
-        echo "--- Host IP Information ---"
-        ip a
-        echo "--- LXD Network List ---"
-        sudo lxc network list
-        echo "--- LXD Bridge Configuration ---"
-        sudo lxc network show lxdbr0 || echo "lxdbr0 not found or command failed"
-        echo "--- Launching Test Container ---"
-        sudo lxc launch images:ubuntu/22.04 test-container
-        sleep 15
-        echo "--- LXD Container List ---"
-        sudo lxc list
-        echo "--- Checking Container Connectivity ---"
-        sudo lxc exec test-container -- ping -c 3 8.8.8.8
-        echo "--- Checking Container DNS and Package Manager ---"
-        sudo lxc exec test-container -- cat /etc/resolv.conf
-        sudo lxc exec test-container -- apt-get update
-        echo "--- LXD Test Container Logs ---"
-        sudo lxc info test-container --show-log
-        echo "--- Cleaning up test container ---"
-        sudo lxc delete --force test-container
-
     - name: Build the snap
-      # Run build with the lxd group's permissions.
-      run: sg lxd -c "snapcraft"
+      # Build in destructive mode to avoid LXD networking issues in CI.
+      run: snapcraft --destructive-mode
 
     - name: Install the snap
       run: |
