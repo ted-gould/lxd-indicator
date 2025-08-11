@@ -64,6 +64,7 @@ jobs:
         # Run test with the lxd group's permissions.
         sg lxd -c "
         set -ex
+        export GDK_BACKEND=x11
         mkdir -p /home/runner/snap/lxd-indicator/common/.cache
         xvfb-run lxd-indicator > app.log 2>&1 &
         sleep 10
