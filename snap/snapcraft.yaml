@@ -11,13 +11,20 @@ confinement: strict
 apps:
   lxd-indicator:
     command: bin/lxd-indicator.py
+    command-chain: [snap/command-chain/desktop-launch]
     extensions:
       - gnome # Use 'gnome' for core22, not 'gnome-3-38'
     plugs:
       - network
       - gsettings
       - lxd
+      - desktop
+      - opengl
+      - wayland
+      - x11
     autostart: lxd-indicator.desktop
+    environment:
+      GTK_USE_PORTAL: '1'
 
 parts:
   lxd-indicator:
