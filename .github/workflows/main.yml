@@ -1,0 +1,57 @@
+name: Snap CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test-snap:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xvfb
+        sudo snap install --classic snapcraft
+        sudo snap install --classic lxd
+
+    - name: Configure LXD
+      run: |
+        sudo lxd init --auto
+        sudo usermod -a -G lxd $USER
+
+    - name: Build the snap
+      # Run build in a subshell with the new group to have access to lxd.
+      run: newgrp lxd << 'END'
+        set -ex
+        snapcraft
+        END
+
+    - name: Install the snap
+      run: |
+        sudo snap install --dangerous lxd-indicator_*.snap
+        sudo snap connect lxd-indicator:lxd
+
+    - name: Test the snap
+      run: |
+        set -ex
+        # Run test in a subshell with the new group to have access to the lxd socket.
+        newgrp lxd << 'END'
+        set -ex
+        # Run lxd-indicator in the background under xvfb
+        xvfb-run lxd-indicator > app.log 2>&1 &
+        # Wait for the app to start
+        sleep 10
+        # Check the logs for success
+        echo "--- Application logs ---"
+        cat app.log
+        echo "------------------------"
+        grep "Successfully connected to LXD" app.log
+        # Kill the app
+        pkill -f lxd-indicator.py
+        END
