@@ -20,13 +20,18 @@ jobs:
         sudo snap install --classic snapcraft
         sudo snap install --classic lxd
 
+    - name: Wait for snapd
+      run: sudo snap wait system seed.loaded
+
     - name: Configure LXD
       run: |
         sudo lxd init --auto
         sudo usermod -a -G lxd $USER
 
     - name: Pre-install build dependencies
-      run: sudo snap install gtk-common-themes
+      run: |
+        sudo snap install gtk-common-themes
+        sudo snap install gnome-42-2204-sdk
 
     - name: Build the snap
       # Build in destructive mode and print logs on failure.
