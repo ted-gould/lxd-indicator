@@ -36,15 +36,10 @@ parts:
       - python3-gi
       - gir1.2-gtk-3.0
       - gir1.2-appindicator3-0.1
-      - libappindicator3-1 # Runtime dependency for AppIndicator
-    override-build: |
-      snapcraftctl build
-      # The command in apps is 'bin/lxd-indicator.py'.
-      # We need to p the script into a 'bin' directory within the part's install path.
-      mkdir -p $SNAPCRAFT_PART_INSTALL/bin
-      cp $SNAPCRAFT_PROJECT_DIR/lxd-indicator.py $SNAPCRAFT_PART_INSTALL/bin/lxd-indicator.py
-      # Ensure the script is executable
-      chmod +x $SNAPCRAFT_PART_INSTALL/bin/lxd-indicator.py
-      # Also copy the icon, to be sure it's located where the script expects it.
-      cp $SNAPCRAFT_PROJECT_DIR/lxd_logo.png $SNAPCRAFT_PART_INSTALL/
-      cp $SNAPCRAFT_PROJECT_DIR/lxd-indicator.desktop $SNAPCRAFT_PART_INSTALL/lxd-indicator.desktop
+      - libappindicator3-1
+      - libgirepository-1.0-1
+      - gir1.2-gdkpixbuf-2.0
+    organize:
+      lxd-indicator.py: bin/lxd-indicator.py
+      lxd_logo.png: lxd_logo.png
+      lxd-indicator.desktop: usr/share/applications/lxd-indicator.desktop
