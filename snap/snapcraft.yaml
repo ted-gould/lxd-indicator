@@ -35,8 +35,8 @@ parts:
     stage-packages:
       - python3-gi
       - gir1.2-gtk-3.0
-      - gir1.2-appindicator3-0.1
-      - libappindicator3-1
+      - gir1.2-ayatanaappindicator3-0.1
+      - libayatana-appindicator3-1
       - libgirepository-1.0-1
       - gir1.2-gdkpixbuf-2.0
     override-build: |
