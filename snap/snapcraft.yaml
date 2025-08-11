@@ -39,7 +39,8 @@ parts:
       - libappindicator3-1
       - libgirepository-1.0-1
       - gir1.2-gdkpixbuf-2.0
-    organize:
-      lxd-indicator.py: bin/lxd-indicator.py
-      lxd_logo.png: lxd_logo.png
-      lxd-indicator.desktop: usr/share/applications/lxd-indicator.desktop
+    override-build: |
+      snapcraftctl build
+      install -D -m 755 $SNAPCRAFT_PART_SRC/lxd-indicator.py $SNAPCRAFT_PART_INSTALL/bin/lxd-indicator.py
+      install -D -m 644 $SNAPCRAFT_PART_SRC/lxd_logo.png $SNAPCRAFT_PART_INSTALL/lxd_logo.png
+      install -D -m 644 $SNAPCRAFT_PART_SRC/lxd-indicator.desktop $SNAPCRAFT_PART_INSTALL/usr/share/applications/lxd-indicator.desktop
