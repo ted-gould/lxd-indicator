@@ -118,20 +118,20 @@ class LXDIndicatorApp:
             self.lxd_client = None
             self.lxd_error_message = f"LXD API Attribute Error during fetch: {e}. Re-initializing connection."
             print(f"Error during fetch: {self.lxd_error_message}")
-            return
+            return []
         except ClientConnectionFailed:
             self.lxd_client = None
             self.lxd_error_message = "LXD Connection Lost: Daemon unreachable."
             print(f"Error during fetch: {self.lxd_error_message}")
-            return
+            return []
         except LXDAPIException as e:
             self.lxd_error_message = f"LXD API Error during fetch: {e}"
             print(f"Error during fetch: {self.lxd_error_message}")
-            return
+            return []
         except Exception as e:
             self.lxd_error_message = f"Unexpected error fetching instances: {e}"
             print(f"Error during fetch: {self.lxd_error_message}")
-            return
+            return []
 
 
     def _periodic_refresh_lxd_data(self):
