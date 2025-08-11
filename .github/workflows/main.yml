@@ -27,7 +27,8 @@ jobs:
 
     - name: Build the snap
       # Run build in a subshell with the new group to have access to lxd.
-      run: newgrp lxd << 'END'
+      run: |
+        newgrp lxd <<'END'
         set -ex
         snapcraft
         END
