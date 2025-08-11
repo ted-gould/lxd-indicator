@@ -23,15 +23,29 @@ jobs:
     - name: Wait for snapd
       run: sudo snap wait system seed.loaded
 
-    - name: Configure LXD
+    - name: Configure LXD and restart snapd
       run: |
         sudo lxd init --auto
         sudo usermod -a -G lxd $USER
+        sudo systemctl restart snapd
 
-    - name: Pre-install build dependencies
+    - name: Pre-install build dependencies with retries
       run: |
-        sudo snap install gtk-common-themes
-        sudo snap install gnome-42-2204-sdk
+        for snap in gtk-common-themes gnome-42-2204-sdk gnome-42-2204; do
+          echo "--- Installing $snap ---"
+          for i in 1 2 3; do
+            if sudo snap install "$snap"; then
+              echo "$snap installed successfully."
+              break
+            fi
+            if [ $i -eq 3 ]; then
+              echo "Failed to install $snap after 3 attempts."
+              exit 1
+            fi
+            echo "Failed to install $snap, retrying in 10 seconds..."
+            sleep 10
+          done
+        done
 
     - name: Build the snap
       # Build in destructive mode and print logs on failure.
