@@ -26,12 +26,8 @@ jobs:
         sudo usermod -a -G lxd $USER
 
     - name: Build the snap
-      # Run build in a subshell with the new group to have access to lxd.
-      run: |
-        newgrp lxd <<'END'
-        set -ex
-        snapcraft
-        END
+      # Run build with the lxd group's permissions.
+      run: sg lxd -c "snapcraft"
 
     - name: Install the snap
       run: |
@@ -41,18 +37,14 @@ jobs:
     - name: Test the snap
       run: |
         set -ex
-        # Run test in a subshell with the new group to have access to the lxd socket.
-        newgrp lxd << 'END'
+        # Run test with the lxd group's permissions.
+        sg lxd -c "
         set -ex
-        # Run lxd-indicator in the background under xvfb
         xvfb-run lxd-indicator > app.log 2>&1 &
-        # Wait for the app to start
         sleep 10
-        # Check the logs for success
-        echo "--- Application logs ---"
+        echo '--- Application logs ---'
         cat app.log
-        echo "------------------------"
-        grep "Successfully connected to LXD" app.log
-        # Kill the app
+        echo '------------------------'
+        grep 'Successfully connected to LXD' app.log
         pkill -f lxd-indicator.py
-        END
+        "
