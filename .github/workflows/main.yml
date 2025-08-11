@@ -55,7 +55,8 @@ jobs:
     - name: Install the snap
       run: |
         sudo snap install --dangerous lxd-indicator_*.snap
-        sudo snap connect lxd-indicator:lxd
+        sleep 10 # Give snapd time to process the new snap's interfaces
+        sudo snap connect lxd-indicator:lxd lxd
 
     - name: Test the snap
       run: |
