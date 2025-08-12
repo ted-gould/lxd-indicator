@@ -2,45 +2,57 @@
 
 set -e
 
-echo "--- Debugging launch script ---"
-echo "Running as user: $(whoami)"
-echo "PATH is: $PATH"
-echo "--- Contents of $SNAP/usr/bin ---"
-ls -l "$SNAP/usr/bin" || echo "Could not list $SNAP/usr/bin"
-echo "--- Contents of $SNAP/bin ---"
-ls -l "$SNAP/bin" || echo "Could not list $SNAP/bin"
-echo "---------------------------"
-
 # Set XDG_DATA_DIRS to include snapped resources
 export XDG_DATA_DIRS="$SNAP/usr/share:$SNAP/share:/usr/share:/var/lib/snapd/desktop"
 
-# Set a fallback GTK theme to prevent crashes in environments without a configured theme
+# Set a fallback GTK theme to prevent crashes
 export GTK_THEME="Adwaita:dark"
 
-# Ensure the icon theme cache is up-to-date
-if [ -d "$SNAP/usr/share/icons" ]; then
-  if [ ! -f "$SNAP/usr/share/icons/hicolor/index.theme" ]; then
-    echo "Running gtk-update-icon-cache..."
-    gtk-update-icon-cache -f -t "$SNAP/usr/share/icons/hicolor"
-  fi
+# --- GDK Pixbuf cache ---
+# Create a writable cache file and export the environment variable
+GDK_PIXBUF_CACHE_FILE="$SNAP_USER_DATA/.cache/gdk-pixbuf-loaders.cache"
+mkdir -p "$(dirname "$GDK_PIXBUF_CACHE_FILE")"
+# Find the query tool, as it's not always in the PATH
+GDK_PIXBUF_QUERY_LOADERS=$(find "$SNAP" -name gdk-pixbuf-query-loaders -type f | head -n 1)
+if [ -n "$GDK_PIXBUF_QUERY_LOADERS" ]; then
+  echo "Updating GDK pixbuf loaders cache..."
+  "$GDK_PIXBUF_QUERY_LOADERS" > "$GDK_PIXBUF_CACHE_FILE"
+  export GDK_PIXBUF_MODULE_FILE="$GDK_PIXBUF_CACHE_FILE"
+else
+  echo "WARNING: gdk-pixbuf-query-loaders not found."
 fi
 
-# Update GDK pixbuf loader cache
-if [ -n "$(find "$SNAP/usr/lib" -name 'gdk-pixbuf-2.0')" ]; then
-  echo "Updating gdk-pixbuf loaders cache..."
-  gdk-pixbuf-query-loaders --update-cache
-fi
-
-# Update GTK input module cache
-if [ -n "$(find "$SNAP/usr/lib" -name 'gtk-3.0')" ]; then
+# --- GTK IM modules cache ---
+# Create a writable cache file and export the environment variable
+GTK_IM_MODULE_CACHE_FILE="$SNAP_USER_DATA/.cache/gtk-immodules.cache"
+mkdir -p "$(dirname "$GTK_IM_MODULE_CACHE_FILE")"
+# Find the query tool
+GTK_QUERY_IMMODULES=$(find "$SNAP" -name gtk-query-immodules-3.0 -type f | head -n 1)
+if [ -n "$GTK_QUERY_IMMODULES" ]; then
   echo "Updating GTK IM modules cache..."
-  gtk-query-immodules-3.0 --update-cache
+  "$GTK_QUERY_IMMODULES" > "$GTK_IM_MODULE_CACHE_FILE"
+  export GTK_IM_MODULE_FILE="$GTK_IM_MODULE_CACHE_FILE"
+else
+  echo "WARNING: gtk-query-immodules-3.0 not found."
 fi
 
-# Compile GSettings schemas
+# --- GSettings schemas ---
+# Copy schemas to a writable location and compile them there
+GSETTINGS_SCHEMA_DIR="$SNAP_USER_DATA/.local/share/glib-2.0/schemas"
+mkdir -p "$GSETTINGS_SCHEMA_DIR"
 if [ -d "$SNAP/usr/share/glib-2.0/schemas" ]; then
-  echo "Compiling GSettings schemas..."
-  glib-compile-schemas "$SNAP/usr/share/glib-2.0/schemas"
+  echo "Copying and compiling GSettings schemas..."
+  cp -r "$SNAP/usr/share/glib-2.0/schemas"/* "$GSETTINGS_SCHEMA_DIR"
+  # Find the compile tool
+  GLIB_COMPILE_SCHEMAS=$(find "$SNAP" -name glib-compile-schemas -type f | head -n 1)
+  if [ -n "$GLIB_COMPILE_SCHEMAS" ]; then
+    "$GLIB_COMPILE_SCHEMAS" "$GSETTINGS_SCHEMA_DIR"
+    export GSETTINGS_SCHEMA_DIR="$GSETTINGS_SCHEMA_DIR"
+  else
+    echo "WARNING: glib-compile-schemas not found."
+  fi
+else
+    echo "WARNING: No GSettings schemas found to compile."
 fi
 
 # Execute the main application
