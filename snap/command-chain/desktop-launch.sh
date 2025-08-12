@@ -2,6 +2,15 @@
 
 set -e
 
+echo "--- Debugging launch script ---"
+echo "Running as user: $(whoami)"
+echo "PATH is: $PATH"
+echo "--- Contents of $SNAP/usr/bin ---"
+ls -l "$SNAP/usr/bin" || echo "Could not list $SNAP/usr/bin"
+echo "--- Contents of $SNAP/bin ---"
+ls -l "$SNAP/bin" || echo "Could not list $SNAP/bin"
+echo "---------------------------"
+
 # Set XDG_DATA_DIRS to include snapped resources
 export XDG_DATA_DIRS="$SNAP/usr/share:$SNAP/share:/usr/share:/var/lib/snapd/desktop"
 
