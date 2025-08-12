@@ -46,6 +46,12 @@ if [ -d "$SNAP/usr/share/glib-2.0/schemas" ]; then
   # Find the compile tool
   GLIB_COMPILE_SCHEMAS=$(find "$SNAP" -name glib-compile-schemas | head -n 1)
   if [ -n "$GLIB_COMPILE_SCHEMAS" ]; then
+    echo "--- Running diagnostics on glib-compile-schemas ---"
+    echo "Found executable at: $GLIB_COMPILE_SCHEMAS"
+    echo "LD_LIBRARY_PATH is: $LD_LIBRARY_PATH"
+    echo "Running ldd:"
+    ldd "$GLIB_COMPILE_SCHEMAS" || echo "ldd failed to run."
+    echo "-------------------------------------------------"
     "$GLIB_COMPILE_SCHEMAS" "$GSETTINGS_SCHEMA_DIR"
     export GSETTINGS_SCHEMA_DIR="$GSETTINGS_SCHEMA_DIR"
   else
