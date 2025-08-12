@@ -13,7 +13,7 @@ export GTK_THEME="Adwaita:dark"
 GDK_PIXBUF_CACHE_FILE="$SNAP_USER_DATA/.cache/gdk-pixbuf-loaders.cache"
 mkdir -p "$(dirname "$GDK_PIXBUF_CACHE_FILE")"
 # Find the query tool, as it's not always in the PATH
-GDK_PIXBUF_QUERY_LOADERS=$(find "$SNAP" -executable -name gdk-pixbuf-query-loaders | head -n 1)
+GDK_PIXBUF_QUERY_LOADERS=$(find "$SNAP" -name gdk-pixbuf-query-loaders | head -n 1)
 if [ -n "$GDK_PIXBUF_QUERY_LOADERS" ]; then
   echo "Updating GDK pixbuf loaders cache..."
   "$GDK_PIXBUF_QUERY_LOADERS" > "$GDK_PIXBUF_CACHE_FILE"
@@ -27,7 +27,7 @@ fi
 GTK_IM_MODULE_CACHE_FILE="$SNAP_USER_DATA/.cache/gtk-immodules.cache"
 mkdir -p "$(dirname "$GTK_IM_MODULE_CACHE_FILE")"
 # Find the query tool
-GTK_QUERY_IMMODULES=$(find "$SNAP" -executable -name gtk-query-immodules-3.0 | head -n 1)
+GTK_QUERY_IMMODULES=$(find "$SNAP" -name gtk-query-immodules-3.0 | head -n 1)
 if [ -n "$GTK_QUERY_IMMODULES" ]; then
   echo "Updating GTK IM modules cache..."
   "$GTK_QUERY_IMMODULES" > "$GTK_IM_MODULE_CACHE_FILE"
@@ -44,7 +44,7 @@ if [ -d "$SNAP/usr/share/glib-2.0/schemas" ]; then
   echo "Copying and compiling GSettings schemas..."
   cp -r "$SNAP/usr/share/glib-2.0/schemas"/* "$GSETTINGS_SCHEMA_DIR"
   # Find the compile tool
-  GLIB_COMPILE_SCHEMAS=$(find "$SNAP" -executable -name glib-compile-schemas | head -n 1)
+  GLIB_COMPILE_SCHEMAS=$(find "$SNAP" -name glib-compile-schemas | head -n 1)
   if [ -n "$GLIB_COMPILE_SCHEMAS" ]; then
     "$GLIB_COMPILE_SCHEMAS" "$GSETTINGS_SCHEMA_DIR"
     export GSETTINGS_SCHEMA_DIR="$GSETTINGS_SCHEMA_DIR"
