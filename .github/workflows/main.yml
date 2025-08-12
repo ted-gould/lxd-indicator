@@ -66,7 +66,7 @@ jobs:
         set -ex
         export GDK_BACKEND=x11
         mkdir -p /home/runner/snap/lxd-indicator/common/.cache
-        xvfb-run lxd-indicator > app.log 2>&1 &
+        xvfb-run dbus-run-session lxd-indicator > app.log 2>&1 &
         sleep 10
         echo '--- Application logs ---'
         cat app.log
