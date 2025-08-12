@@ -12,8 +12,8 @@ export GTK_THEME="Adwaita:dark"
 # Create a writable cache file and export the environment variable
 GDK_PIXBUF_CACHE_FILE="$SNAP_USER_DATA/.cache/gdk-pixbuf-loaders.cache"
 mkdir -p "$(dirname "$GDK_PIXBUF_CACHE_FILE")"
-# Find the query tool, as it's not always in the PATH
-GDK_PIXBUF_QUERY_LOADERS=$(find "$SNAP" -name gdk-pixbuf-query-loaders | head -n 1)
+# Find the query tool directly in lib dirs to avoid broken symlinks in bin
+GDK_PIXBUF_QUERY_LOADERS=$(find "$SNAP/usr/lib" -name gdk-pixbuf-query-loaders | head -n 1)
 if [ -n "$GDK_PIXBUF_QUERY_LOADERS" ]; then
   echo "Updating GDK pixbuf loaders cache..."
   "$GDK_PIXBUF_QUERY_LOADERS" > "$GDK_PIXBUF_CACHE_FILE"
@@ -26,8 +26,8 @@ fi
 # Create a writable cache file and export the environment variable
 GTK_IM_MODULE_CACHE_FILE="$SNAP_USER_DATA/.cache/gtk-immodules.cache"
 mkdir -p "$(dirname "$GTK_IM_MODULE_CACHE_FILE")"
-# Find the query tool
-GTK_QUERY_IMMODULES=$(find "$SNAP" -name gtk-query-immodules-3.0 | head -n 1)
+# Find the query tool directly in lib dirs to avoid broken symlinks in bin
+GTK_QUERY_IMMODULES=$(find "$SNAP/usr/lib" -name gtk-query-immodules-3.0 | head -n 1)
 if [ -n "$GTK_QUERY_IMMODULES" ]; then
   echo "Updating GTK IM modules cache..."
   "$GTK_QUERY_IMMODULES" > "$GTK_IM_MODULE_CACHE_FILE"
@@ -43,15 +43,9 @@ mkdir -p "$GSETTINGS_SCHEMA_DIR"
 if [ -d "$SNAP/usr/share/glib-2.0/schemas" ]; then
   echo "Copying and compiling GSettings schemas..."
   cp -r "$SNAP/usr/share/glib-2.0/schemas"/* "$GSETTINGS_SCHEMA_DIR"
-  # Find the compile tool
-  GLIB_COMPILE_SCHEMAS=$(find "$SNAP" -name glib-compile-schemas | head -n 1)
+  # Find the compile tool directly in lib dirs to avoid broken symlinks in bin
+  GLIB_COMPILE_SCHEMAS=$(find "$SNAP/usr/lib" -name glib-compile-schemas | head -n 1)
   if [ -n "$GLIB_COMPILE_SCHEMAS" ]; then
-    echo "--- Running diagnostics on glib-compile-schemas ---"
-    echo "Found executable at: $GLIB_COMPILE_SCHEMAS"
-    echo "LD_LIBRARY_PATH is: $LD_LIBRARY_PATH"
-    echo "Running ldd:"
-    ldd "$GLIB_COMPILE_SCHEMAS" || echo "ldd failed to run."
-    echo "-------------------------------------------------"
     "$GLIB_COMPILE_SCHEMAS" "$GSETTINGS_SCHEMA_DIR"
     export GSETTINGS_SCHEMA_DIR="$GSETTINGS_SCHEMA_DIR"
   else
