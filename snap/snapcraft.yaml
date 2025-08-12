@@ -25,6 +25,7 @@ apps:
     autostart: lxd-indicator.desktop
     environment:
       GTK_USE_PORTAL: '1'
+      PYTHONPATH: $SNAP/usr/lib/python3/dist-packages
 
 parts:
   lxd-indicator:
