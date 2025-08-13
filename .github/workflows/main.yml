@@ -74,3 +74,9 @@ jobs:
         grep 'Successfully connected to LXD' app.log
         pkill -f lxd-indicator.py
         "
+
+    - name: Upload snap artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: lxd-indicator-snap
+        path: lxd-indicator_*.snap
