@@ -12,11 +12,10 @@ export GTK_THEME="Adwaita:dark"
 # Create a writable cache file and export the environment variable
 GDK_PIXBUF_CACHE_FILE="$SNAP_USER_DATA/.cache/gdk-pixbuf-loaders.cache"
 mkdir -p "$(dirname "$GDK_PIXBUF_CACHE_FILE")"
-# Find the query tool, resolve symlinks, and execute it
-GDK_PIXBUF_QUERY_LOADERS_PATH=$(find "$SNAP" -name gdk-pixbuf-query-loaders | head -n 1)
-if [ -n "$GDK_PIXBUF_QUERY_LOADERS_PATH" ]; then
+# Find the query tool and execute it
+GDK_PIXBUF_QUERY_LOADERS_EXEC=$(find "$SNAP" -name gdk-pixbuf-query-loaders | head -n 1)
+if [ -n "$GDK_PIXBUF_QUERY_LOADERS_EXEC" ]; then
   echo "Updating GDK pixbuf loaders cache..."
-  GDK_PIXBUF_QUERY_LOADERS_EXEC=$(realpath "$GDK_PIXBUF_QUERY_LOADERS_PATH")
   "$GDK_PIXBUF_QUERY_LOADERS_EXEC" > "$GDK_PIXBUF_CACHE_FILE"
   export GDK_PIXBUF_MODULE_FILE="$GDK_PIXBUF_CACHE_FILE"
 else
@@ -27,11 +26,10 @@ fi
 # Create a writable cache file and export the environment variable
 GTK_IM_MODULE_CACHE_FILE="$SNAP_USER_DATA/.cache/gtk-immodules.cache"
 mkdir -p "$(dirname "$GTK_IM_MODULE_CACHE_FILE")"
-# Find the query tool, resolve symlinks, and execute it
-GTK_QUERY_IMMODULES_PATH=$(find "$SNAP" -name gtk-query-immodules-3.0 | head -n 1)
-if [ -n "$GTK_QUERY_IMMODULES_PATH" ]; then
+# Find the query tool and execute it
+GTK_QUERY_IMMODULES_EXEC=$(find "$SNAP" -name gtk-query-immodules-3.0 | head -n 1)
+if [ -n "$GTK_QUERY_IMMODULES_EXEC" ]; then
   echo "Updating GTK IM modules cache..."
-  GTK_QUERY_IMMODULES_EXEC=$(realpath "$GTK_QUERY_IMMODULES_PATH")
   "$GTK_QUERY_IMMODULES_EXEC" > "$GTK_IM_MODULE_CACHE_FILE"
   export GTK_IM_MODULE_FILE="$GTK_IM_MODULE_CACHE_FILE"
 else
@@ -45,10 +43,9 @@ mkdir -p "$GSETTINGS_SCHEMA_DIR"
 if [ -d "$SNAP/usr/share/glib-2.0/schemas" ]; then
   echo "Copying and compiling GSettings schemas..."
   cp -r "$SNAP/usr/share/glib-2.0/schemas"/* "$GSETTINGS_SCHEMA_DIR"
-  # Find the compile tool, resolve symlinks, and execute it
-  GLIB_COMPILE_SCHEMAS_PATH=$(find "$SNAP" -name glib-compile-schemas | head -n 1)
-  if [ -n "$GLIB_COMPILE_SCHEMAS_PATH" ]; then
-    GLIB_COMPILE_SCHEMAS_EXEC=$(realpath "$GLIB_COMPILE_SCHEMAS_PATH")
+  # Find the compile tool and execute it
+  GLIB_COMPILE_SCHEMAS_EXEC=$(find "$SNAP" -name glib-compile-schemas | head -n 1)
+  if [ -n "$GLIB_COMPILE_SCHEMAS_EXEC" ]; then
     "$GLIB_COMPILE_SCHEMAS_EXEC" "$GSETTINGS_SCHEMA_DIR"
     export GSETTINGS_SCHEMA_DIR="$GSETTINGS_SCHEMA_DIR"
   else
