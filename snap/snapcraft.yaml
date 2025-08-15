@@ -19,14 +19,11 @@ apps:
       - opengl
       - wayland
       - x11
-      - gtk-common-themes
-      - icon-themes
-      - sound-themes
     autostart: lxd-indicator.desktop
     environment:
       GTK_USE_PORTAL: '1'
       PYTHONPATH: $SNAP/usr/lib/python3/dist-packages
-      GI_TYPELIB_PATH: $SNAP/usr/lib/x86_64-linux-gnu/girepository-1.0
+      GI_TYPELIB_PATH: $SNAP/usr/lib/$SNAPCRAFT_ARCH_TRIPLET/girepository-1.0:$SNAP/usr/lib/girepository-1.0
       LD_LIBRARY_PATH: $SNAP/lib/$SNAPCRAFT_ARCH_TRIPLET:$SNAP/usr/lib/$SNAPCRAFT_ARCH_TRIPLET:$LD_LIBRARY_PATH
 
 parts:
@@ -38,12 +35,15 @@ parts:
     stage-packages:
       - python3-gi
       - gir1.2-gtk-3.0
-      - gir1.2-ayatanaappindicator3-0.1
-      - libayatana-appindicator3-1
+      - gir1.2-appindicator3-0.1
+      - libappindicator3-1
       - libgirepository-1.0-1
       - gir1.2-gdkpixbuf-2.0
       - dconf-gsettings-backend
+      - libgdk-pixbuf-2.0-0
       - libgtk-3-bin
+      - libglib2.0-0
+      - librsvg2-common
       - adwaita-icon-theme-full
       - gnome-themes-extra
       - shared-mime-info

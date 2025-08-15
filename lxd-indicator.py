@@ -2,8 +2,8 @@
 
 import gi
 gi.require_version('Gtk', '3.0')
-gi.require_version('AyatanaAppIndicator3', '0.1')
-from gi.repository import Gtk, AyatanaAppIndicator3, GLib
+gi.require_version('AppIndicator3', '0.1')
+from gi.repository import Gtk, AppIndicator3, GLib
 
 import os
 import signal
@@ -35,12 +35,12 @@ class LXDIndicatorApp:
     def __init__(self):
         self.lxd_client = None
         self.use_legacy_api = False # Flag to determine if using containers (True) or instances (False)
-        self.indicator = AyatanaAppIndicator3.Indicator.new(
+        self.indicator = AppIndicator3.Indicator.new(
             APPINDICATOR_ID,
             LXD_MAIN_ICON_PATH, # Use the resolved path
-            AyatanaAppIndicator3.IndicatorCategory.SYSTEM_SERVICES
+            AppIndicator3.IndicatorCategory.SYSTEM_SERVICES
         )
-        self.indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
+        self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
 
         self.menu = Gtk.Menu()
         self.indicator.set_menu(self.menu)
