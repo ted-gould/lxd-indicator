@@ -72,11 +72,10 @@ jobs:
         # and fails if it's not present. We can create a dummy service
         # that does nothing but successfully activates.
         mkdir -p /home/runner/.local/share/dbus-1/services
-        cat > /home/runner/.local/share/dbus-1/services/org.freedesktop.systemd1.service <<EOF
-[D-BUS Service]
-Name=org.freedesktop.systemd1
-Exec=/bin/true
-EOF
+        SERVICE_FILE=/home/runner/.local/share/dbus-1/services/org.freedesktop.systemd1.service
+        echo '[D-BUS Service]' > \$SERVICE_FILE
+        echo 'Name=org.freedesktop.systemd1' >> \$SERVICE_FILE
+        echo 'Exec=/bin/true' >> \$SERVICE_FILE
 
         xvfb-run dbus-run-session lxd-indicator > app.log 2>&1 &
         sleep 10
