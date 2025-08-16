@@ -66,8 +66,19 @@ jobs:
         set -ex
         export GDK_BACKEND=x11
         mkdir -p /home/runner/snap/lxd-indicator/common/.cache
+
+        # Create a fake systemd service to satisfy AppIndicator3.
+        # The indicator library tries to activate this service on startup,
+        # and fails if it's not present. We can create a dummy service
+        # that does nothing but successfully activates.
+        mkdir -p /home/runner/.local/share/dbus-1/services
+        SERVICE_FILE=/home/runner/.local/share/dbus-1/services/org.freedesktop.systemd1.service
+        echo '[D-BUS Service]' > \$SERVICE_FILE
+        echo 'Name=org.freedesktop.systemd1' >> \$SERVICE_FILE
+        echo 'Exec=/bin/true' >> \$SERVICE_FILE
+
         xvfb-run dbus-run-session lxd-indicator > app.log 2>&1 &
-        sleep 10
+        sleep 30
         echo '--- Application logs ---'
         cat app.log
         echo '------------------------'
