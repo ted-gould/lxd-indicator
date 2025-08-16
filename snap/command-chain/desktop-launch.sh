@@ -12,12 +12,19 @@ export GTK_THEME="Adwaita:dark"
 # Create a writable cache file and export the environment variable
 GDK_PIXBUF_CACHE_FILE="$SNAP_USER_DATA/.cache/gdk-pixbuf-loaders.cache"
 mkdir -p "$(dirname "$GDK_PIXBUF_CACHE_FILE")"
+
 # Find the query tool and execute it
 GDK_PIXBUF_QUERY_LOADERS_EXEC=$(find "$SNAP" -name gdk-pixbuf-query-loaders | head -n 1)
 if [ -n "$GDK_PIXBUF_QUERY_LOADERS_EXEC" ]; then
   echo "Updating GDK pixbuf loaders cache..."
-  "$GDK_PIXBUF_QUERY_LOADERS_EXEC" > "$GDK_PIXBUF_CACHE_FILE"
-  export GDK_PIXBUF_MODULE_FILE="$GDK_PIXBUF_CACHE_FILE"
+  # Find all loader modules and pass them to the query tool
+  LOADER_MODULES=$(find "$SNAP/usr/lib" -name 'libpixbufloader-*.so')
+  if [ -n "$LOADER_MODULES" ]; then
+    "$GDK_PIXBUF_QUERY_LOADERS_EXEC" $LOADER_MODULES > "$GDK_PIXBUF_CACHE_FILE"
+    export GDK_PIXBUF_MODULE_FILE="$GDK_PIXBUF_CACHE_FILE"
+  else
+    echo "WARNING: No GDK pixbuf loaders found."
+  fi
 else
   echo "WARNING: gdk-pixbuf-query-loaders not found."
 fi
