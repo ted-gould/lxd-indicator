@@ -78,7 +78,7 @@ jobs:
         echo 'Exec=/bin/true' >> \$SERVICE_FILE
 
         xvfb-run dbus-run-session lxd-indicator > app.log 2>&1 &
-        sleep 10
+        sleep 30
         echo '--- Application logs ---'
         cat app.log
         echo '------------------------'
