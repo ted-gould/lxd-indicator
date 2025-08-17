@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-and-test-snap:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -31,7 +31,7 @@ jobs:
 
     - name: Pre-install build dependencies with retries
       run: |
-        for snap in gtk-common-themes gnome-42-2204-sdk gnome-42-2204; do
+        for snap in gtk-common-themes gnome-46-2404-sdk gnome-46-2404; do
           echo "--- Installing $snap ---"
           for i in 1 2 3; do
             if sudo snap install "$snap"; then
