@@ -3,12 +3,15 @@
 
 import concurrent.futures
 import functools
+import hashlib
+import json
 import os
 import shutil
 import signal
+import ssl
 import subprocess
 import threading
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import gi
 
@@ -22,9 +25,19 @@ except (ValueError, ImportError):
     from gi.repository import AppIndicator3
 from gi.repository import Gio, GLib, Gtk
 
+try:
+    # The terminal widget behind GNOME Terminal; optional, for "Terminal".
+    gi.require_version("Vte", "2.91")
+    from gi.repository import Vte
+except (ValueError, ImportError):
+    Vte = None
+
+import requests.certs
 import yaml
 from pylxd import Client
 from pylxd.exceptions import ClientConnectionFailed, LXDAPIException, NotFound
+from ws4py.exc import HandshakeError
+from ws4py.client.threadedclient import WebSocketClient
 
 APPINDICATOR_ID = "lxd-status-indicator"
 APP_NAME = "lxd-indicator"
@@ -67,6 +80,17 @@ AUTOSTART_DIR = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "autostart"
 )
 AUTOSTART_FILE = os.path.join(AUTOSTART_DIR, f"{APP_NAME}.desktop")
+
+# The shell started by "Terminal": bash like `lxc exec <instance> -- bash`,
+# falling back to sh for images without bash (Alpine, BusyBox).
+TERMINAL_COMMAND = [
+    "sh",
+    "-c",
+    "if command -v bash >/dev/null 2>&1; then exec bash -l; fi; exec sh -l",
+]
+TERMINAL_TERM = "xterm-256color"  # what VTE emulates
+TERMINAL_SCROLLBACK = 10000  # lines
+SIGHUP = 1
 
 # Freedesktop icon names for instance states
 ICON_RUNNING = "media-playback-start-symbolic"
@@ -175,9 +199,321 @@ def _instance_label(remote, name):
     return name if remote is None else f"{remote}:{name}"
 
 
+def _can_open_terminal(status):
+    """Whether "Terminal" works for an instance: it needs a running one."""
+    return Vte is not None and status == "running"
+
+
 def _sort_key(info):
     # Local instances first, then each remote in alphabetical order.
     return (info["remote"] is not None, info["remote"] or "", info["name"])
+
+
+def _pinned_fingerprint(path):
+    """Returns the SHA-256 fingerprint of the PEM certificate at path."""
+    with open(path) as f:
+        der = ssl.PEM_cert_to_DER_cert(f.read())
+    return hashlib.sha256(der).hexdigest()
+
+
+def _websocket_security(client):
+    """Returns (ssl_options, pinned fingerprint or None) for client's websockets.
+
+    The websockets must be as trusted as the client's HTTPS connection: the
+    same client certificate, and the server checked against the certificate
+    lxc pinned for the remote, or else against the system CAs.
+    """
+    if not client.websocket_url.startswith("wss:"):
+        return {}, None
+    options = {}
+    if client.cert:
+        options["certfile"], options["keyfile"] = client.cert
+    verify = client.api.session.verify
+    if isinstance(verify, str):
+        # Pinned certificates are self-signed and seldom name the address
+        # used, so they're compared by fingerprint once connected instead.
+        return options, _pinned_fingerprint(verify)
+    if verify is not False:
+        options["ca_certs"] = requests.certs.where()
+        options["cert_reqs"] = ssl.CERT_REQUIRED
+    return options, None
+
+
+class _ExecWebsocket(WebSocketClient):
+    """One websocket of an exec operation, reporting to callbacks."""
+
+    def __init__(self, url, resource, on_message, on_closed, ssl_options, pinned):
+        # Like pylxd: LXD rejects the Origin ws4py makes up for unix sockets.
+        super().__init__(url, ssl_options=ssl_options, exclude_headers=["origin"])
+        self.resource = resource
+        self._on_message = on_message
+        self._on_closed = on_closed
+        self._pinned = pinned
+
+    @property
+    def handshake_request(self):
+        # Built once TLS is up and before anything, the secret included, is
+        # sent: the place to check the server against the pinned certificate.
+        if self._pinned is not None:
+            der = self.sock.getpeercert(binary_form=True)
+            if der is None or hashlib.sha256(der).hexdigest() != self._pinned:
+                self.close_connection()
+                raise HandshakeError("server certificate does not match lxc's")
+        return super().handshake_request
+
+    def received_message(self, message):
+        self._on_message(message)
+
+    def closed(self, code, reason=None):
+        self._on_closed()
+
+
+class TerminalSession:
+    """An interactive shell in an instance, like `lxc exec <instance> -- bash`.
+
+    Runs the command through the LXD exec API, so it needs only the LXD
+    connection the indicator already has. The terminal's input goes in with
+    send_input() and resize(); output comes back through on_output(bytes).
+    Once the shell exits or the connection drops, on_exit(exit code or None)
+    is called, once. Callbacks run on the websocket threads.
+    """
+
+    def __init__(
+        self,
+        client,
+        instance_name,
+        on_output,
+        on_exit,
+        columns=80,
+        rows=24,
+        command=None,
+        websocket_factory=_ExecWebsocket,
+    ):
+        self.client = client
+        self.instance_name = instance_name
+        self.on_output = on_output
+        self.on_exit = on_exit
+        self.command = command or TERMINAL_COMMAND
+        self.websocket_factory = websocket_factory
+        self.operation_id = None
+        self._size = (columns, rows)
+        self._sent_size = None  # the size LXD was last told
+        self._data = None
+        self._control = None
+        self._pending = []  # input typed before the session is connected
+        self._closing = False
+        self._exited = False
+        self._lock = threading.Lock()
+
+    def start(self):
+        """Starts the shell and connects to it. Blocks; raises on failure."""
+        api = self.client.api
+        with self._lock:
+            columns, rows = self._sent_size = self._size
+        response = api.instances[self.instance_name]["exec"].post(
+            json={
+                "command": self.command,
+                "environment": {"TERM": TERMINAL_TERM},
+                "interactive": True,
+                "wait-for-websocket": True,
+                "width": columns,
+                "height": rows,
+            }
+        )
+        body = response.json()
+        fds = body["metadata"]["metadata"]["fds"]
+        self.operation_id = body["operation"].split("/")[-1].split("?")[0]
+        path = urlparse(api.operations[self.operation_id].websocket._api_endpoint).path
+        url = self.client.websocket_url
+        ssl_options, pinned = _websocket_security(self.client)
+
+        def connect(fd, on_message, on_closed):
+            ws = self.websocket_factory(
+                url,
+                f"{path}?secret={fds[fd]}",
+                on_message,
+                on_closed,
+                ssl_options,
+                pinned,
+            )
+            ws.connect()
+            return ws
+
+        try:
+            control = connect("control", lambda _message: None, lambda: None)
+            with self._lock:
+                self._control = control
+            # LXD starts the command once every websocket is connected.
+            data = connect("0", self._on_data, self._on_data_closed)
+        except Exception:
+            self.close()
+            raise
+        with self._lock:
+            self._data = data
+            pending, self._pending = self._pending, []
+            closing = self._closing
+        if closing:  # the window went away while connecting
+            self.close()
+            return
+        for chunk in pending:
+            self._send(data, chunk, binary=True)
+        self._send_size()
+
+    def send_input(self, data):
+        """Sends keystrokes (bytes) to the shell."""
+        with self._lock:
+            data_ws = self._data
+            if data_ws is None:
+                if not self._closing:
+                    self._pending.append(data)
+                return
+        self._send(data_ws, data, binary=True)
+
+    def resize(self, columns, rows):
+        """Tells the shell the terminal is now columns x rows."""
+        with self._lock:
+            self._size = (columns, rows)
+        self._send_size()
+
+    def close(self):
+        """Hangs up the shell and disconnects."""
+        with self._lock:
+            self._closing = True
+            control, data = self._control, self._data
+            exited = self._exited
+        if control is not None and not exited:  # else there's no one to hang up
+            self._send(control, self._control_message("signal", signal=SIGHUP))
+        for ws in (data, control):
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:  # already gone
+                    pass
+
+    @staticmethod
+    def _control_message(command, **fields):
+        return json.dumps({"command": command, **fields})
+
+    def _send_size(self):
+        with self._lock:
+            control = self._control if self._data is not None else None
+            if control is None or self._size == self._sent_size:
+                return
+            columns, rows = self._sent_size = self._size
+        args = {"width": str(columns), "height": str(rows)}
+        self._send(control, self._control_message("window-resize", args=args))
+
+    @staticmethod
+    def _send(ws, payload, binary=False):
+        try:
+            ws.send(payload, binary=binary)
+        except Exception as e:  # the connection is going; closed() follows
+            print(f"Terminal: failed to send: {e}")
+
+    def _on_data(self, message):
+        if message.data:
+            self.on_output(bytes(message.data))
+
+    def _on_data_closed(self):
+        with self._lock:
+            if self._exited:
+                return
+            self._exited = True
+            control = self._control
+        if control is not None:
+            try:
+                control.close()
+            except Exception:
+                pass
+        self.on_exit(self._exit_code())
+
+    def _exit_code(self):
+        """The shell's exit status, or None if it's unknown (connection lost)."""
+        if self.operation_id is None:
+            return None
+        try:
+            # The command has ended by now, or is about to: wait briefly.
+            response = self.client.api.operations[self.operation_id].wait.get(
+                params={"timeout": 3}
+            )
+            return response.json()["metadata"]["metadata"]["return"]
+        except Exception as e:
+            print(f"Terminal: no exit status for {self.instance_name}: {e}")
+            return None
+
+
+class TerminalWindow:
+    """A window with a terminal running a shell in an instance."""
+
+    def __init__(self, client, remote, instance_name, on_destroy=None):
+        self.label = _instance_label(remote, instance_name)
+        self._on_destroy_callback = on_destroy
+        self._destroyed = False
+
+        self.window = Gtk.Window(title=f"{self.label} — LXD")
+        self.window.set_default_size(800, 500)
+        self.terminal = Vte.Terminal()
+        self.terminal.set_scrollback_lines(TERMINAL_SCROLLBACK)
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.add(self.terminal)
+        self.window.add(scrolled)
+
+        self.session = TerminalSession(
+            client,
+            instance_name,
+            on_output=lambda data: GLib.idle_add(self._feed, data),
+            on_exit=lambda code: GLib.idle_add(self._on_exit, code),
+            columns=self.terminal.get_column_count(),
+            rows=self.terminal.get_row_count(),
+        )
+        self.terminal.connect("commit", self._on_commit)
+        self.terminal.connect("size-allocate", self._on_size_allocate)
+        self.window.connect("destroy", self._on_destroy)
+        self.window.show_all()
+        self.terminal.grab_focus()
+
+        threading.Thread(target=self._start, daemon=True).start()
+
+    def _start(self):
+        try:
+            self.session.start()
+        except Exception as e:
+            print(f"Terminal for {self.label} failed: {e}")
+            GLib.idle_add(self._show_message, f"Couldn't start a shell: {e}")
+
+    def _feed(self, data):
+        if not self._destroyed:
+            self.terminal.feed(data)
+        return False
+
+    def _show_message(self, text):
+        self._feed(f"\r\n[{text}]\r\n".encode())
+        return False
+
+    def _on_exit(self, code):
+        if self._destroyed:
+            return False
+        if code == 0:
+            # Like a terminal app, close once the shell exits normally.
+            self.window.destroy()
+        elif code is None:
+            self._show_message("Connection to the instance closed")
+        else:
+            self._show_message(f"Shell exited with status {code}")
+        return False
+
+    def _on_commit(self, _terminal, text, _size):
+        self.session.send_input(text.encode("utf-8", "surrogateescape"))
+
+    def _on_size_allocate(self, terminal, _allocation):
+        self.session.resize(terminal.get_column_count(), terminal.get_row_count())
+
+    def _on_destroy(self, _window):
+        self._destroyed = True
+        threading.Thread(target=self.session.close, daemon=True).start()
+        if self._on_destroy_callback:
+            self._on_destroy_callback(self)
 
 
 class LXDIndicatorApp:
@@ -191,6 +527,7 @@ class LXDIndicatorApp:
         self.lxd_instances_cache = []
         self._lock = threading.Lock()
         self._refresh_event = threading.Event()
+        self._terminal_windows = set()  # open TerminalWindows, kept alive
 
         self._current_icon = None
         self._portal = None
@@ -357,14 +694,17 @@ class LXDIndicatorApp:
             self._refresh_event.wait(REFRESH_INTERVAL)
             self._refresh_event.clear()
 
+    def _client_for(self, remote):
+        """The connected client for remote (None for local), or None."""
+        if remote is None:
+            return self.lxd_client
+        return self.remote_clients.get(remote, (None, None))[1]
+
     def _run_action(self, remote, instance_name, action):
         label = _instance_label(remote, instance_name)
         with self._lock:
             try:
-                if remote is None:
-                    client = self.lxd_client
-                else:
-                    client = self.remote_clients.get(remote, (None, None))[1]
+                client = self._client_for(remote)
                 if not client:
                     raise RuntimeError("LXD client not available")
                 instance = client.instances.get(instance_name)
@@ -506,6 +846,18 @@ class LXDIndicatorApp:
             stop.set_sensitive(status in ("running", "frozen"))
             submenu.append(start)
             submenu.append(stop)
+            submenu.append(Gtk.SeparatorMenuItem())
+            terminal = Gtk.MenuItem(label="Terminal")
+            terminal.connect(
+                "activate",
+                functools.partial(self._on_open_terminal, remote, name),
+            )
+            terminal.set_sensitive(_can_open_terminal(status))
+            if Vte is None:
+                terminal.set_tooltip_text(
+                    "Needs the VTE terminal widget (gir1.2-vte-2.91)"
+                )
+            submenu.append(terminal)
             item.set_submenu(submenu)
             self.menu.append(item)
 
@@ -534,6 +886,19 @@ class LXDIndicatorApp:
             target=self._run_action, args=(remote, instance_name, action), daemon=True
         ).start()
 
+    def _on_open_terminal(self, remote, instance_name, _widget):
+        label = _instance_label(remote, instance_name)
+        client = self._client_for(remote)
+        if client is None:
+            self.lxd_error_message = f"Can't open a terminal on {label}: not connected."
+            self._build_or_update_menu()
+            return
+        print(f"Opening a terminal on {label}")
+        window = TerminalWindow(
+            client, remote, instance_name, on_destroy=self._terminal_windows.discard
+        )
+        self._terminal_windows.add(window)
+
     def _on_autostart_toggled(self, widget):
         # For snaps, snapd's `autostart:` support launches the app at login when
         # this file exists in $SNAP_USER_DATA/.config/autostart.
@@ -561,6 +926,11 @@ if __name__ == "__main__":
     for icon_path in (ICON_LIGHT_THEME, ICON_DARK_THEME, ICON_ALERT):
         if not os.path.exists(icon_path):
             print(f"Warning: icon not found at {icon_path}")
+    if Vte is None:
+        print("VTE not available: the Terminal menu items are disabled.")
+    else:
+        version = f"{Vte.get_major_version()}.{Vte.get_minor_version()}"
+        print(f"Terminal support enabled (VTE {version}).")
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     app = LXDIndicatorApp()
     Gtk.main()

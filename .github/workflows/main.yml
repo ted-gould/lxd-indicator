@@ -133,6 +133,8 @@ jobs:
         fi
         pkill -f lxd-indicator.py || true
         test $result -eq 0
+        # The Terminal menu items need VTE to load inside the snap.
+        grep -q 'Terminal support enabled' app.log
 
     - name: Upload snap artifact
       uses: actions/upload-artifact@v6
