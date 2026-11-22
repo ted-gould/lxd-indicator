@@ -23,7 +23,7 @@ try:
 except (ValueError, ImportError):
     gi.require_version("AppIndicator3", "0.1")
     from gi.repository import AppIndicator3
-from gi.repository import Gio, GLib, Gtk
+from gi.repository import GLib, Gtk
 
 try:
     # The terminal widget behind GNOME Terminal; optional, for "Terminal".
@@ -47,17 +47,15 @@ REMOTE_TIMEOUT = 5  # seconds; keeps an unreachable remote from stalling refresh
 SNAP_DIR = os.environ.get("SNAP")
 # In the snap the icons sit at $SNAP; in a source checkout, next to this file.
 ICON_DIR = SNAP_DIR or os.path.dirname(os.path.abspath(__file__))
-# Panel icons: monochrome to match the desktop theme, orange for alerts.
-ICON_LIGHT_THEME = os.path.join(ICON_DIR, "lxd_logo_light.svg")  # black, no bg
-ICON_DARK_THEME = os.path.join(ICON_DIR, "lxd_logo_dark.svg")  # white, no bg
-ICON_ALERT = os.path.join(ICON_DIR, "lxd_logo.svg")  # orange, no bg
-
-# XDG desktop portal, which reports the user's light/dark preference.
-PORTAL_BUS_NAME = "org.freedesktop.portal.Desktop"
-PORTAL_OBJECT_PATH = "/org/freedesktop/portal/desktop"
-PORTAL_SETTINGS_IFACE = "org.freedesktop.portal.Settings"
-APPEARANCE_NAMESPACE = "org.freedesktop.appearance"
-COLOR_SCHEME_KEY = "color-scheme"  # 0 = no preference, 1 = dark, 2 = light
+# Panel icon: a symbolic icon, looked up by name in ICON_THEME_DIR. The panel
+# recolors symbolic icons to match its own text, so the glyph stays visible on
+# light and dark panels alike, whatever the application theme is.
+ICON_THEME_DIR = os.path.join(ICON_DIR, "icons")
+ICON_NORMAL = "lxd-indicator-symbolic"
+ICON_NORMAL_FILE = os.path.join(
+    ICON_THEME_DIR, "hicolor", "scalable", "apps", f"{ICON_NORMAL}.svg"
+)
+ICON_ALERT = os.path.join(ICON_DIR, "lxd_logo.svg")  # orange, full color
 
 # Candidate LXD unix sockets, in order of preference. Inside a strict snap the
 # `lxd` interface only grants access to the LXD snap's socket.
@@ -531,17 +529,16 @@ class LXDIndicatorApp:
         self._terminal_windows = set()  # open TerminalWindows, kept alive
 
         self._current_icon = None
-        self._portal = None
-        self._portal_color_scheme = 0
 
         self.indicator = AppIndicator3.Indicator.new(
             APPINDICATOR_ID,
-            ICON_LIGHT_THEME,
+            ICON_NORMAL,
             AppIndicator3.IndicatorCategory.SYSTEM_SERVICES,
         )
+        # The panel, not this process, loads the icon: tell it where to look.
+        self.indicator.set_icon_theme_path(ICON_THEME_DIR)
         self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
         self.indicator.set_title("LXD Indicator")
-        self._watch_theme()
         self._update_icon()
 
         self.menu = Gtk.Menu()
@@ -725,69 +722,12 @@ class LXDIndicatorApp:
 
     # ---- UI (GTK main thread) -------------------------------------------
 
-    def _watch_theme(self):
-        """Follows light/dark changes via the desktop portal, falling back to GTK."""
-        try:
-            self._portal = Gio.DBusProxy.new_for_bus_sync(
-                Gio.BusType.SESSION,
-                Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES,
-                None,
-                PORTAL_BUS_NAME,
-                PORTAL_OBJECT_PATH,
-                PORTAL_SETTINGS_IFACE,
-                None,
-            )
-            self._portal.connect("g-signal", self._on_portal_signal)
-            self._portal_color_scheme = self._read_portal_color_scheme()
-        except GLib.Error as e:
-            self._portal = None
-            print(f"Desktop portal unavailable, using GTK theme for icon: {e.message}")
-
-        gtk_settings = Gtk.Settings.get_default()
-        if gtk_settings is not None:
-            for prop in ("gtk-theme-name", "gtk-application-prefer-dark-theme"):
-                gtk_settings.connect(f"notify::{prop}", lambda *_a: self._update_icon())
-
-    def _read_portal_color_scheme(self):
-        args = GLib.Variant("(ss)", (APPEARANCE_NAMESPACE, COLOR_SCHEME_KEY))
-        # ReadOne is the current API; older portals only have the deprecated Read.
-        for method in ("ReadOne", "Read"):
-            try:
-                result = self._portal.call_sync(
-                    method, args, Gio.DBusCallFlags.NONE, 2000, None
-                )
-                return int(result.unpack()[0])
-            except (GLib.Error, TypeError, ValueError):
-                continue
-        return 0
-
-    def _on_portal_signal(self, _proxy, _sender, signal_name, parameters):
-        if signal_name != "SettingChanged":
-            return
-        namespace, key, value = parameters.unpack()
-        if namespace == APPEARANCE_NAMESPACE and key == COLOR_SCHEME_KEY:
-            self._portal_color_scheme = int(value)
-            self._update_icon()
-
-    def _is_dark_theme(self):
-        if self._portal_color_scheme in (1, 2):
-            return self._portal_color_scheme == 1
-        gtk_settings = Gtk.Settings.get_default()
-        if gtk_settings is None:
-            return False
-        if gtk_settings.get_property("gtk-application-prefer-dark-theme"):
-            return True
-        theme = (gtk_settings.get_property("gtk-theme-name") or "").lower()
-        return "dark" in theme
-
     def _update_icon(self):
         # Alert when LXD can't be reached: no client and a reason to show.
         if self.lxd_client is None and self.lxd_error_message:
             icon, description = ICON_ALERT, "LXD unavailable"
-        elif self._is_dark_theme():
-            icon, description = ICON_DARK_THEME, "LXD"
         else:
-            icon, description = ICON_LIGHT_THEME, "LXD"
+            icon, description = ICON_NORMAL, "LXD"
         if icon != self._current_icon:
             self._current_icon = icon
             self.indicator.set_icon_full(icon, description)
@@ -924,7 +864,7 @@ class LXDIndicatorApp:
 
 
 if __name__ == "__main__":
-    for icon_path in (ICON_LIGHT_THEME, ICON_DARK_THEME, ICON_ALERT):
+    for icon_path in (ICON_NORMAL_FILE, ICON_ALERT):
         if not os.path.exists(icon_path):
             print(f"Warning: icon not found at {icon_path}")
     if Vte is None:
