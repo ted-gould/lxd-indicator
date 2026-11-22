@@ -157,8 +157,9 @@ class LoadRemotesTest(IndicatorTestCase):
             lxc_dir = os.path.join(home, ".config", "lxc")
             for path in (snap_dir, lxc_dir):
                 os.makedirs(path)
-            with mock.patch.dict(os.environ), mock.patch.object(
-                ind, "LXC_CONFIG_CANDIDATES", [snap_dir, lxc_dir]
+            with (
+                mock.patch.dict(os.environ),
+                mock.patch.object(ind, "LXC_CONFIG_CANDIDATES", [snap_dir, lxc_dir]),
             ):
                 del os.environ["LXD_CONF"]
                 self.assertIsNone(ind._lxc_config_dir())
@@ -287,9 +288,12 @@ class ListingTest(IndicatorTestCase):
 
     def test_unreadable_config_in_snap_suggests_connecting_plug(self):
         app = self.make_app(FakeServers(self.SERVERS))
-        with mock.patch.object(
-            ind, "_load_remotes", side_effect=PermissionError("denied")
-        ), mock.patch.object(ind, "_snap_plug_connected", return_value=False):
+        with (
+            mock.patch.object(
+                ind, "_load_remotes", side_effect=PermissionError("denied")
+            ),
+            mock.patch.object(ind, "_snap_plug_connected", return_value=False),
+        ):
             app._refresh_once()
         self.assertIn(
             "snap connect lxd-indicator:lxc-config", app.remote_errors["remotes"]

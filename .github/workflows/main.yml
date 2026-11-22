@@ -7,6 +7,18 @@ on:
     branches: [ "main" ]
 
 jobs:
+  black:
+    runs-on: ubuntu-24.04
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    - name: Check formatting with black
+      uses: psf/black@stable
+      with:
+        options: "--check --diff"
+        version: "~= 26.0"
+
   unit-tests:
     runs-on: ubuntu-24.04
     steps:
