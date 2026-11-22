@@ -454,3 +454,79 @@ class HelpersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RequiredPlugsTest(unittest.TestCase):
+    def setUp(self):
+        ind.Gtk.MessageDialog.reset_mock(return_value=True)
+        ind.Gtk.Label.reset_mock()
+        ind.Gtk.main.reset_mock()
+        ind.Gio.AppInfo.launch_default_for_uri.reset_mock(side_effect=True)
+        self.dialog = ind.Gtk.MessageDialog.return_value
+        patch = mock.patch.object(ind, "_snap_plug_connected")
+        self.plug = patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_connected_or_unknown_needs_no_dialog(self):
+        for state in (True, None):
+            self.plug.return_value = state
+            self.assertTrue(ind.ensure_required_plugs())
+        ind.Gtk.MessageDialog.assert_not_called()
+
+    def test_quit_when_disconnected(self):
+        self.plug.return_value = False
+        self.dialog.run.return_value = ind.Gtk.ResponseType.CLOSE
+        self.assertFalse(ind.ensure_required_plugs())
+        self.dialog.destroy.assert_called_once_with()
+        label = ind.Gtk.Label.call_args.kwargs["label"]
+        self.assertEqual(label, "sudo snap connect lxd-indicator:lxd lxd")
+
+    def test_check_again_after_connecting(self):
+        self.plug.side_effect = [False, False, True]
+        self.dialog.run.return_value = ind.Gtk.ResponseType.OK
+        self.assertTrue(ind.ensure_required_plugs())
+        self.assertEqual(self.dialog.run.call_count, 2)
+
+    def test_app_center_keeps_the_dialog_open(self):
+        self.plug.side_effect = [False, True]
+        self.dialog.run.side_effect = [
+            ind.RESPONSE_APP_CENTER,
+            ind.Gtk.ResponseType.OK,
+        ]
+        with mock.patch.dict(os.environ, {"SNAP_NAME": "lxd-indicator"}):
+            self.assertTrue(ind.ensure_required_plugs())
+        ind.Gio.AppInfo.launch_default_for_uri.assert_called_once_with(
+            "snap://lxd-indicator", None
+        )
+        ind.Gtk.MessageDialog.assert_called_once()
+        self.dialog.destroy.assert_called_once_with()
+
+    def test_app_center_failure_is_logged(self):
+        launch = ind.Gio.AppInfo.launch_default_for_uri
+        launch.side_effect = FakeGLibError("no handler")
+        self.addCleanup(setattr, launch, "side_effect", None)
+        with (
+            mock.patch.object(ind.GLib, "Error", FakeGLibError),
+            mock.patch("builtins.print") as printed,
+        ):
+            ind._open_app_center()
+        printed.assert_called_once_with("Failed to open App Center: no handler")
+
+    def test_main_exits_without_starting(self):
+        with (
+            mock.patch.object(ind, "ensure_required_plugs", return_value=False),
+            mock.patch.object(ind, "enable_autostart") as autostart,
+            mock.patch.object(ind, "LXDIndicatorApp") as app,
+            mock.patch.object(ind.signal, "signal"),
+        ):
+            self.assertEqual(ind.main(), 1)
+        app.assert_not_called()
+        autostart.assert_not_called()
+        ind.Gtk.main.assert_not_called()
+
+    def test_connect_command_uses_the_instance_name(self):
+        with mock.patch.dict(os.environ, {"SNAP_INSTANCE_NAME": "lxd-indicator_x"}):
+            self.assertEqual(
+                ind._connect_command("lxc-config"),
+                "sudo snap connect lxd-indicator_x:lxc-config",
+            )
