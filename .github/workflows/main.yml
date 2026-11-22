@@ -60,6 +60,7 @@ jobs:
         sudo snap install --dangerous lxd-indicator_*.snap
         sleep 10 # Give snapd time to process the new snap's interfaces
         sudo snap connect lxd-indicator:lxd lxd
+        sudo snap connect lxd-indicator:lxc-config
         sudo snap connect lxd-indicator:gnome-46-2404 gnome-46-2404 || true
         sudo snap connect lxd-indicator:gpu-2404 mesa-2404 || true
         snap connections lxd-indicator

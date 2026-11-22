@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""System tray indicator showing the state of local LXD instances."""
+"""System tray indicator showing the state of local and remote LXD instances."""
 
+import concurrent.futures
 import functools
 import os
 import shutil
@@ -21,12 +22,14 @@ except (ValueError, ImportError):
     from gi.repository import AppIndicator3
 from gi.repository import GLib, Gtk
 
+import yaml
 from pylxd import Client
 from pylxd.exceptions import ClientConnectionFailed, LXDAPIException, NotFound
 
 APPINDICATOR_ID = 'lxd-status-indicator'
 APP_NAME = 'lxd-indicator'
 REFRESH_INTERVAL = 10  # seconds
+REMOTE_TIMEOUT = 5  # seconds; keeps an unreachable remote from stalling refreshes
 
 SNAP_DIR = os.environ.get('SNAP')
 if SNAP_DIR:
@@ -40,6 +43,16 @@ else:
 LXD_SOCKET_CANDIDATES = [
     '/var/snap/lxd/common/lxd/unix.socket',
     '/var/lib/lxd/unix.socket',
+]
+
+# The lxc client's configuration directory, which lists the remotes along with
+# the client certificate and pinned server certificates, relative to the real
+# home directory (inside a snap $HOME points at the snap's private data). The
+# snap's `lxc-config` personal-files plug grants read access to these.
+REAL_HOME = os.environ.get('SNAP_REAL_HOME') or os.path.expanduser('~')
+LXC_CONFIG_CANDIDATES = [
+    os.path.join(REAL_HOME, 'snap', 'lxd', 'common', 'config'),
+    os.path.join(REAL_HOME, '.config', 'lxc'),
 ]
 
 AUTOSTART_DIR = os.path.join(
@@ -87,10 +100,72 @@ def _diagnose_connection_failure(socket_path, error):
     return f"LXD connection failed: {error}"
 
 
+def _lxc_config_dir():
+    if 'LXD_CONF' in os.environ:
+        return os.environ['LXD_CONF']
+    for path in LXC_CONFIG_CANDIDATES:
+        if os.path.exists(os.path.join(path, 'config.yml')):
+            return path
+    return None
+
+
+def _load_remotes():
+    """Returns (config_dir, {name: remote}) for remotes that can host instances.
+
+    Raises OSError or yaml.YAMLError if the config exists but can't be read.
+    """
+    config_dir = _lxc_config_dir()
+    if not config_dir:
+        return None, {}
+    config_file = os.path.join(config_dir, 'config.yml')
+    if not os.path.exists(config_file):
+        return config_dir, {}
+    with open(config_file) as f:
+        config = yaml.safe_load(f) or {}
+
+    remotes = {}
+    for name, remote in (config.get('remotes') or {}).items():
+        if not isinstance(remote, dict) or name == 'local':
+            continue
+        addr = remote.get('addr') or ''
+        # Image servers (simplestreams, public remotes) have no instances, and
+        # unix:// remotes are the local daemon, which is listed already.
+        if (remote.get('protocol', 'lxd') != 'lxd' or remote.get('public')
+                or not addr.startswith('https://')):
+            continue
+        if remote.get('auth_type') == 'oidc':
+            print(f"Skipping remote {name}: OIDC authentication is not supported.")
+            continue
+        remotes[name] = remote
+    return config_dir, remotes
+
+
+def _instance_dicts(remote, client):
+    return [{
+        'remote': remote,
+        'name': item.name,
+        'status': item.status.lower(),
+        'type': getattr(item, 'type', 'container').lower(),
+    } for item in client.instances.all()]
+
+
+def _instance_label(remote, name):
+    return name if remote is None else f"{remote}:{name}"
+
+
+def _sort_key(info):
+    # Local instances first, then each remote in alphabetical order.
+    return (info['remote'] is not None, info['remote'] or '', info['name'])
+
+
 class LXDIndicatorApp:
     def __init__(self):
         self.lxd_client = None
         self.lxd_error_message = None
+        # Remote name -> (connection settings, pylxd Client) for lxc remotes.
+        self.remote_clients = {}
+        # Remote name -> error message for remotes that failed this refresh.
+        self.remote_errors = {}
         self.lxd_instances_cache = []
         self._lock = threading.Lock()
         self._refresh_event = threading.Event()
@@ -134,13 +209,9 @@ class LXDIndicatorApp:
             if not self.lxd_client:
                 return []
         try:
-            instances = [{
-                'name': item.name,
-                'status': item.status.lower(),
-                'type': getattr(item, 'type', 'container').lower(),
-            } for item in self.lxd_client.instances.all()]
+            instances = _instance_dicts(None, self.lxd_client)
             self.lxd_error_message = None
-            return sorted(instances, key=lambda i: i['name'])
+            return instances
         except LXDAPIException as e:
             self.lxd_error_message = f"LXD API error: {e}"
         except Exception as e:  # requests ConnectionError etc. — reconnect next time
@@ -149,11 +220,81 @@ class LXDIndicatorApp:
         print(f"Error during fetch: {self.lxd_error_message}")
         return []
 
+    def _remote_client(self, config_dir, name, remote):
+        """Returns a connected client for an lxc remote, reusing a cached one."""
+        settings = (config_dir, remote.get('addr'), remote.get('project'))
+        cached = self.remote_clients.get(name)
+        if cached and cached[0] == settings:
+            return cached[1]
+
+        cert = (os.path.join(config_dir, 'client.crt'), os.path.join(config_dir, 'client.key'))
+        if not all(os.path.exists(path) for path in cert):
+            cert = None
+        # lxc pins each remote's certificate here when the remote is added;
+        # pylxd checks the server against that fingerprint when given a path.
+        server_cert = os.path.join(config_dir, 'servercerts', f'{name}.crt')
+        verify = server_cert if os.path.exists(server_cert) else True
+
+        client = Client(endpoint=remote['addr'], cert=cert, verify=verify,
+                        timeout=REMOTE_TIMEOUT, project=remote.get('project'))
+        self.remote_clients[name] = (settings, client)
+        print(f"Successfully connected to remote {name} at {remote['addr']}.")
+        return client
+
+    def _fetch_remote_instances(self, config_dir, name, remote):
+        """Returns (instances, error message or None) for one lxc remote."""
+        try:
+            client = self._remote_client(config_dir, name, remote)
+            return _instance_dicts(name, client), None
+        except ClientConnectionFailed as e:
+            error = f"Connection failed: {e}" if str(e) else "Connection failed"
+        except LXDAPIException as e:
+            error = f"LXD API error: {e}"
+        except Exception as e:  # requests errors etc.
+            error = f"Lost connection: {e}"
+        # Reconnect from scratch next time.
+        self.remote_clients.pop(name, None)
+        print(f"Error fetching instances from remote {name}: {error}")
+        return [], error
+
+    def _fetch_all_remote_instances(self):
+        """Returns (instances, {remote: error}) across all configured remotes."""
+        try:
+            config_dir, remotes = _load_remotes()
+        except (OSError, yaml.YAMLError) as e:
+            if _snap_plug_connected('lxc-config') is False:
+                message = ("Can't read the lxc config. Run: "
+                           "sudo snap connect lxd-indicator:lxc-config")
+            else:
+                message = f"Can't read the lxc config: {e}"
+            print(f"Error: {message}")
+            return [], {'remotes': message}
+
+        # Forget clients for remotes that were removed from the config.
+        for name in set(self.remote_clients) - set(remotes):
+            del self.remote_clients[name]
+        if not remotes:
+            return [], {}
+
+        instances, errors = [], {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(remotes)) as pool:
+            futures = {name: pool.submit(self._fetch_remote_instances, config_dir, name, remote)
+                       for name, remote in remotes.items()}
+            for name, future in futures.items():
+                remote_instances, error = future.result()
+                instances.extend(remote_instances)
+                if error:
+                    errors[name] = error
+        return instances, errors
+
     def _refresh_once(self):
         with self._lock:
-            previous = (self.lxd_instances_cache, self.lxd_error_message)
-            self.lxd_instances_cache = self._fetch_instances()
-            if (self.lxd_instances_cache, self.lxd_error_message) != previous:
+            previous = (self.lxd_instances_cache, self.lxd_error_message, self.remote_errors)
+            local_instances = self._fetch_instances()
+            remote_instances, self.remote_errors = self._fetch_all_remote_instances()
+            self.lxd_instances_cache = sorted(local_instances + remote_instances, key=_sort_key)
+            current = (self.lxd_instances_cache, self.lxd_error_message, self.remote_errors)
+            if current != previous:
                 GLib.idle_add(self._build_or_update_menu)
 
     def _refresh_loop(self):
@@ -162,18 +303,23 @@ class LXDIndicatorApp:
             self._refresh_event.wait(REFRESH_INTERVAL)
             self._refresh_event.clear()
 
-    def _run_action(self, instance_name, action):
+    def _run_action(self, remote, instance_name, action):
+        label = _instance_label(remote, instance_name)
         with self._lock:
             try:
-                if not self.lxd_client:
+                if remote is None:
+                    client = self.lxd_client
+                else:
+                    client = self.remote_clients.get(remote, (None, None))[1]
+                if not client:
                     raise RuntimeError("LXD client not available")
-                instance = self.lxd_client.instances.get(instance_name)
+                instance = client.instances.get(instance_name)
                 getattr(instance, action)(wait=True, timeout=30)
-                print(f"{action} completed on {instance_name}.")
+                print(f"{action} completed on {label}.")
             except NotFound:
-                self.lxd_error_message = f"Instance {instance_name} not found."
+                self.lxd_error_message = f"Instance {label} not found."
             except Exception as e:
-                self.lxd_error_message = f"Failed to {action} {instance_name}: {e}"
+                self.lxd_error_message = f"Failed to {action} {label}: {e}"
             else:
                 # Refresh right away so the new state shows up. On failure, leave
                 # the error visible until the next periodic refresh instead.
@@ -188,15 +334,18 @@ class LXDIndicatorApp:
         for item in self.menu.get_children():
             self.menu.remove(item)
 
-        if self.lxd_error_message:
-            error_item = Gtk.MenuItem(label=self.lxd_error_message)
+        errors = [self.lxd_error_message] if self.lxd_error_message else []
+        errors += [f"{remote}: {message}" for remote, message in sorted(self.remote_errors.items())]
+        for message in errors:
+            error_item = Gtk.MenuItem(label=message)
             error_item.set_sensitive(False)
             self.menu.append(error_item)
+        if errors:
             self.menu.append(Gtk.SeparatorMenuItem())
 
         instances = list(self.lxd_instances_cache)
         for info in instances:
-            name, status = info['name'], info['status']
+            remote, name, status = info['remote'], info['name'], info['status']
 
             item = Gtk.MenuItem()
             box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -207,15 +356,18 @@ class LXDIndicatorApp:
             }.get(status, ICON_PENDING)
             box.pack_start(Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU),
                            False, False, 0)
-            box.pack_start(Gtk.Label(label=name, xalign=0), True, True, 0)
+            box.pack_start(Gtk.Label(label=_instance_label(remote, name), xalign=0),
+                           True, True, 0)
             item.add(box)
 
             submenu = Gtk.Menu()
             start = Gtk.MenuItem(label="Start")
-            start.connect('activate', functools.partial(self._on_instance_action, name, 'start'))
+            start.connect('activate', functools.partial(
+                self._on_instance_action, remote, name, 'start'))
             start.set_sensitive(status not in ('running', 'frozen'))
             stop = Gtk.MenuItem(label="Stop")
-            stop.connect('activate', functools.partial(self._on_instance_action, name, 'stop'))
+            stop.connect('activate', functools.partial(
+                self._on_instance_action, remote, name, 'stop'))
             stop.set_sensitive(status in ('running', 'frozen'))
             submenu.append(start)
             submenu.append(stop)
@@ -241,9 +393,9 @@ class LXDIndicatorApp:
         self.menu.show_all()
         return False  # one-shot when used with GLib.idle_add
 
-    def _on_instance_action(self, instance_name, action, _widget):
-        print(f"Action: {action} on instance {instance_name}")
-        threading.Thread(target=self._run_action, args=(instance_name, action),
+    def _on_instance_action(self, remote, instance_name, action, _widget):
+        print(f"Action: {action} on instance {_instance_label(remote, instance_name)}")
+        threading.Thread(target=self._run_action, args=(remote, instance_name, action),
                          daemon=True).start()
 
     def _on_autostart_toggled(self, widget):

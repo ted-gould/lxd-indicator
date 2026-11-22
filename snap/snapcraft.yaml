@@ -18,6 +18,12 @@ description: |
       sudo snap connect lxd-indicator:lxd lxd
 
   Your user must also be a member of the `lxd` group.
+
+  Instances on the remotes configured with `lxc remote add` are listed too,
+  as `remote:name`. To let the indicator read the lxc configuration (the
+  remote list and client certificate), run:
+
+      sudo snap connect lxd-indicator:lxc-config
 grade: stable
 confinement: strict
 
@@ -34,11 +40,20 @@ apps:
     plugs:
       - lxd     # access to /var/snap/lxd/common/lxd/unix.socket
       - unity7  # StatusNotifierItem D-Bus API used by the tray icon
+      - network     # talking to remote LXD servers
+      - lxc-config  # reading the lxc remotes and client certificate
     autostart: lxd-indicator.desktop
     environment:
       PYTHONPATH: $SNAP/lib/python3/site-packages:$SNAP/usr/lib/python3/dist-packages
       # Log lines go straight to the journal/terminal instead of a buffer.
       PYTHONUNBUFFERED: '1'
+
+plugs:
+  lxc-config:
+    interface: personal-files
+    read:
+      - $HOME/snap/lxd/common/config
+      - $HOME/.config/lxc
 
 parts:
   lxd-indicator:
@@ -64,6 +79,7 @@ parts:
       - libexpat1
       - libffi8
       - python3-gi
+      - python3-yaml
       - gir1.2-ayatanaappindicator3-0.1
       - libayatana-appindicator3-1
     override-build: |
