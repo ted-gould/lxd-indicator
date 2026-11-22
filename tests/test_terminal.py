@@ -632,7 +632,37 @@ class TerminalMenuTest(IndicatorTestCase):
         labels = [
             c.kwargs.get("label") for c in ind.Gtk.MenuItem.call_args_list if c.kwargs
         ]
-        self.assertEqual(labels.count("Terminal"), 2)
+        self.assertEqual(labels.count("Terminal"), 1)  # web is running
+        self.assertEqual(labels.count("Start & Terminal"), 1)  # db is stopped
+
+    def test_start_and_terminal_only_for_stopped_instances_with_vte(self):
+        self.assertTrue(ind._needs_start_for_terminal("stopped"))
+        for status in ("running", "frozen", "starting", "error"):
+            self.assertFalse(ind._needs_start_for_terminal(status))
+        with mock.patch.object(ind, "Vte", None):
+            self.assertFalse(ind._needs_start_for_terminal("stopped"))
+
+    def test_start_and_terminal_starts_then_opens_a_terminal(self):
+        db = FakeInstance("db", "Stopped")
+        app = self.make_app(FakeServers({LOCAL: [db]}))
+        app._refresh_once()
+        with mock.patch.object(ind.GLib, "idle_add") as idle_add:
+            app._start_then_open_terminal(None, "db")
+        self.assertEqual(db.actions, ["start"])
+        idle_add.assert_called_once_with(app._open_terminal_idle, None, "db")
+        with mock.patch.object(ind, "TerminalWindow") as window_class:
+            self.assertFalse(app._open_terminal_idle(None, "db"))
+        self.assertEqual(window_class.call_args.args[1:], (None, "db"))
+
+    def test_start_and_terminal_failed_start_opens_no_terminal(self):
+        app = self.make_app(FakeServers({LOCAL: []}))
+        app._refresh_once()
+        with mock.patch.object(ind.GLib, "idle_add") as idle_add:
+            app._start_then_open_terminal(None, "gone")
+        self.assertNotIn(
+            mock.call(app._open_terminal_idle, None, "gone"), idle_add.call_args_list
+        )
+        self.assertIn("gone", app.lxd_error_message)
 
     def test_open_terminal_uses_that_remotes_client(self):
         app = self.make_app(
