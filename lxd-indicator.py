@@ -262,7 +262,14 @@ _CHANGE_TITLES = {
     "thawed": "Thawed",
     "deleted": "Deleted",
 }
-_ACTION_TITLES = {"start": "Start", "stop": "Stop"}
+# Instance actions in the menu: (pylxd method, menu label, statuses it's for).
+INSTANCE_ACTIONS = [
+    ("start", "Start", lambda status: status not in ("running", "frozen")),
+    ("stop", "Stop", lambda status: status in ("running", "frozen")),
+    ("freeze", "Freeze", lambda status: status == "running"),
+    ("unfreeze", "Thaw", lambda status: status == "frozen"),
+]
+_ACTION_TITLES = {action: label for action, label, _ in INSTANCE_ACTIONS}
 
 
 def _notification_text(label, changes):
@@ -1014,7 +1021,8 @@ class LXDIndicatorApp:
                 self.lxd_error_message = f"Instance {label} not found."
             except Exception as e:
                 error = str(e) or type(e).__name__
-                self.lxd_error_message = f"Failed to {action} {label}: {e}"
+                verb = _ACTION_TITLES.get(action, action).lower()
+                self.lxd_error_message = f"Failed to {verb} {label}: {e}"
             else:
                 # Refresh right away so the new state shows up. On failure, leave
                 # the error visible until the next periodic refresh instead.
@@ -1083,20 +1091,14 @@ class LXDIndicatorApp:
             item.add(box)
 
             submenu = Gtk.Menu()
-            start = Gtk.MenuItem(label="Start")
-            start.connect(
-                "activate",
-                functools.partial(self._on_instance_action, remote, name, "start"),
-            )
-            start.set_sensitive(status not in ("running", "frozen"))
-            stop = Gtk.MenuItem(label="Stop")
-            stop.connect(
-                "activate",
-                functools.partial(self._on_instance_action, remote, name, "stop"),
-            )
-            stop.set_sensitive(status in ("running", "frozen"))
-            submenu.append(start)
-            submenu.append(stop)
+            for action, action_label, applies in INSTANCE_ACTIONS:
+                action_item = Gtk.MenuItem(label=action_label)
+                action_item.connect(
+                    "activate",
+                    functools.partial(self._on_instance_action, remote, name, action),
+                )
+                action_item.set_sensitive(applies(status))
+                submenu.append(action_item)
             submenu.append(Gtk.SeparatorMenuItem())
             terminal = Gtk.MenuItem(label="Terminal")
             terminal.connect(

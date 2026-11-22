@@ -48,6 +48,12 @@ class FakeInstance:
     def stop(self, wait, timeout):
         self.actions.append("stop")
 
+    def freeze(self, wait, timeout):
+        self.actions.append("freeze")
+
+    def unfreeze(self, wait, timeout):
+        self.actions.append("unfreeze")
+
 
 class FakeServers:
     """Stands in for pylxd.Client, serving instances per endpoint."""
@@ -336,6 +342,48 @@ class ActionTest(IndicatorTestCase):
         self.app._run_action("gone", "web", "stop")
         self.assertIn("gone:web", self.app.lxd_error_message)
         self.assertFalse(self.app._refresh_event.is_set())
+
+    def test_freeze_and_thaw_go_to_the_instance(self):
+        self.app._run_action(None, "web", "freeze")
+        self.app._run_action(None, "web", "unfreeze")
+        self.assertEqual(self.local_web.actions, ["freeze", "unfreeze"])
+
+    def test_failed_thaw_is_reported_as_thaw(self):
+        self.app.notifier = mock.Mock()
+        self.local_web.unfreeze = mock.Mock(side_effect=RuntimeError("boom"))
+        with mock.patch.object(ind.GLib, "idle_add", lambda f, *a: f(*a)):
+            self.app._run_action(None, "web", "unfreeze")
+        self.assertEqual(self.app.lxd_error_message, "Failed to thaw web: boom")
+        self.app.notifier.action_failed.assert_called_once_with(
+            None, "web", "unfreeze", "boom"
+        )
+
+    def test_menu_actions_follow_the_instance_status(self):
+        self.servers.instances[LOCAL][:] = [
+            FakeInstance("run"),
+            FakeInstance("off", "Stopped"),
+            FakeInstance("ice", "Frozen"),
+        ]
+        self.app._refresh_once()
+        items = []
+
+        def menu_item(label=None):
+            item = mock.Mock(label=label)
+            items.append(item)
+            return item
+
+        with mock.patch.object(ind.Gtk, "MenuItem", menu_item):
+            self.app._build_or_update_menu()
+        actions = ("Start", "Stop", "Freeze", "Thaw")
+        enabled = [
+            [i.label for i in group if i.set_sensitive.call_args.args[0]]
+            for group in zip(*[iter(i for i in items if i.label in actions)] * 4)
+        ]
+        # Listed as ice, off, run, then zeta:web (running).
+        self.assertEqual(
+            enabled,
+            [["Stop", "Thaw"], ["Start"], ["Stop", "Freeze"], ["Stop", "Freeze"]],
+        )
 
     def test_failed_action_sends_a_notification(self):
         self.app.notifier = mock.Mock()
