@@ -1,0 +1,3 @@
+[tool.black]
+# The Python the snap ships (core24).
+target-version = ["py312"]
