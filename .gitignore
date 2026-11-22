@@ -4,4 +4,3 @@ parts/
 stage/
 prime/
 .coverage
-__pycache__/
