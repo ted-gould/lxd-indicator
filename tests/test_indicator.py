@@ -114,6 +114,7 @@ class IndicatorTestCase(unittest.TestCase):
             mock.patch.object(ind, "_lxd_socket_path", return_value="local.socket"),
             mock.patch.object(ind, "quote", lambda path, safe="": path),
             mock.patch.object(ind.LXDIndicatorApp, "_refresh_loop", lambda self: None),
+            mock.patch.object(ind.LXDIndicatorApp, "_event_loop", lambda self: None),
             mock.patch("builtins.print"),
         ]
         for patch in patches:
@@ -336,8 +337,242 @@ class ActionTest(IndicatorTestCase):
         self.assertIn("gone:web", self.app.lxd_error_message)
         self.assertFalse(self.app._refresh_event.is_set())
 
+    def test_failed_action_sends_a_notification(self):
+        self.app.notifier = mock.Mock()
+        self.local_web.start = mock.Mock(side_effect=RuntimeError("boom"))
+        with mock.patch.object(ind.GLib, "idle_add", lambda f, *a: f(*a)):
+            self.app._run_action(None, "web", "start")
+        self.app.notifier.action_failed.assert_called_once_with(
+            None, "web", "start", "boom"
+        )
+
+    def test_successful_action_sends_no_failure_notification(self):
+        self.app.notifier = mock.Mock()
+        with mock.patch.object(ind.GLib, "idle_add", lambda f, *a: f(*a)):
+            self.app._run_action(None, "web", "stop")
+        self.app.notifier.action_failed.assert_not_called()
+
+
+class ChangeTrackingTest(IndicatorTestCase):
+    def setUp(self):
+        super().setUp()
+        self.servers = FakeServers(
+            {
+                LOCAL: [FakeInstance("web"), FakeInstance("db", "Stopped")],
+                "https://zeta:8443": [FakeInstance("api")],
+            }
+        )
+        self.app = self.make_app(self.servers)
+        self.app.notifier = mock.Mock()
+        patch = mock.patch.object(ind.GLib, "idle_add", lambda f, *a: f(*a))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def notified(self):
+        return [c.args for c in self.app.notifier.instance_changes.call_args_list]
+
+    def settle(self):
+        """Takes the first listing and ends the startup quiet period."""
+        self.app._refresh_once()
+        self.app._quiet_until = 0
+
+    def test_first_listing_is_silent(self):
+        self.app._quiet_until = 0
+        self.app._refresh_once()
+        self.assertEqual(self.notified(), [])
+
+    def test_changes_during_startup_quiet_period_are_silent(self):
+        self.app._refresh_once()
+        self.servers.instances[LOCAL].append(FakeInstance("late"))
+        self.app._refresh_once()
+        self.app._quiet_until = 0
+        self.app._refresh_once()
+        self.assertEqual(self.notified(), [])
+
+    def test_start_stop_and_new_instances_are_notified(self):
+        self.settle()
+        local = self.servers.instances[LOCAL]
+        local[0].status = "Stopped"
+        local[1].status = "Running"
+        local.append(FakeInstance("new", "Stopped"))
+        self.servers.instances["https://zeta:8443"].append(FakeInstance("fresh"))
+        self.app._refresh_once()
+        self.assertCountEqual(
+            self.notified(),
+            [
+                (None, "db", ["started"]),
+                (None, "new", ["created"]),
+                (None, "web", ["stopped"]),
+                ("zeta", "fresh", ["created", "started"]),
+            ],
+        )
+
+    def test_unchanged_listing_is_silent(self):
+        self.settle()
+        self.app._refresh_once()
+        self.assertEqual(self.notified(), [])
+
+    def test_changes_while_a_remote_was_unreachable_are_reported_on_return(self):
+        self.settle()
+        self.servers.unreachable.add("https://zeta:8443")
+        self.app._refresh_once()
+        self.servers.instances["https://zeta:8443"].append(FakeInstance("fresh"))
+        self.servers.unreachable.clear()
+        self.app._refresh_once()
+        self.assertEqual(self.notified(), [("zeta", "fresh", ["created", "started"])])
+
+    def test_a_newly_added_remote_is_silent(self):
+        self.write_config("""\
+            remotes:
+              zeta: {addr: "https://zeta:8443", protocol: lxd}
+            """)
+        self.settle()
+        self.write_config(CONFIG)
+        self.servers.instances["https://alpha:8443"] = [FakeInstance("x")]
+        self.app._refresh_once()
+        self.assertEqual(self.notified(), [])
+
+    def test_lifecycle_events_trigger_a_refresh(self):
+        self.app._on_lxd_event({"metadata": {"action": "certificate-created"}})
+        self.assertFalse(self.app._refresh_event.is_set())
+        self.app._on_lxd_event({"metadata": {"action": "instance-started"}})
+        self.assertTrue(self.app._refresh_event.is_set())
+
+
+class FakeNotifier(ind.Notifier):
+    """A Notifier whose D-Bus calls are recorded and answered by the test."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = []  # (replaces_id, summary, body)
+        self.replies = []
+
+    def _dbus_notify(self, args, done):
+        self.calls.append((args[1], args[3], args[4]))
+        self.replies.append(done)
+
+    def reply(self, notification_id):
+        self.replies.pop(0)(notification_id)
+
+
+class NotifierTest(unittest.TestCase):
+    def setUp(self):
+        patch = mock.patch("builtins.print")
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.now = 1000.0
+        patch = mock.patch.object(ind.time, "monotonic", lambda: self.now)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.notifier = FakeNotifier()
+
+    def test_quick_changes_update_one_notification(self):
+        self.notifier.instance_changes(None, "foo", ["created"])
+        self.notifier.reply(7)
+        self.now += 5
+        self.notifier.instance_changes(None, "foo", ["started"])
+        self.assertEqual(
+            self.notifier.calls,
+            [
+                (0, "New Machine: foo", ""),
+                (7, "New Machine: foo", "Created and started"),
+            ],
+        )
+
+    def test_change_while_waiting_for_id_is_sent_once_id_arrives(self):
+        self.notifier.instance_changes("zeta", "foo", ["stopped"])
+        self.notifier.instance_changes("zeta", "foo", ["started"])
+        self.assertEqual(len(self.notifier.calls), 1)
+        self.notifier.reply(3)
+        self.assertEqual(
+            self.notifier.calls[-1], (3, "Started: zeta:foo", "Stopped, then started")
+        )
+
+    def test_later_changes_get_a_new_notification(self):
+        self.notifier.instance_changes(None, "foo", ["started"])
+        self.notifier.reply(7)
+        self.now += ind.NOTIFICATION_MERGE_WINDOW + 1
+        self.notifier.instance_changes(None, "foo", ["stopped"])
+        self.assertEqual(self.notifier.calls[-1], (0, "Stopped: foo", ""))
+
+    def test_dismissed_notification_is_not_reused(self):
+        self.notifier.instance_changes(None, "foo", ["started"])
+        self.notifier.reply(7)
+        closed = mock.Mock()
+        closed.unpack.return_value = (7, 2)
+        self.notifier._on_signal(None, None, "NotificationClosed", closed)
+        self.notifier.instance_changes(None, "foo", ["stopped"])
+        self.assertEqual(self.notifier.calls[-1], (0, "Stopped: foo", ""))
+
+    def test_instances_get_separate_notifications(self):
+        self.notifier.instance_changes(None, "foo", ["started"])
+        self.notifier.reply(7)
+        self.notifier.instance_changes("zeta", "foo", ["started"])
+        self.assertEqual(self.notifier.calls[-1], (0, "Started: zeta:foo", ""))
+
+    def test_action_failure(self):
+        self.notifier.action_failed(None, "web", "start", "boom")
+        self.notifier.reply(9)
+        self.notifier.action_failed(None, "web", "start", "boom again")
+        self.assertEqual(
+            self.notifier.calls,
+            [
+                (0, "Failed to Start", "web: boom"),
+                (9, "Failed to Start", "web: boom again"),
+            ],
+        )
+
+    def test_failed_dbus_call_still_allows_later_notifications(self):
+        self.notifier.instance_changes(None, "foo", ["started"])
+        self.notifier.reply(0)
+        self.notifier.instance_changes(None, "foo", ["stopped"])
+        self.assertEqual(len(self.notifier.calls), 2)
+
+
+class LifecycleEventClientTest(unittest.TestCase):
+    def test_origin_header_is_excluded_and_events_are_forwarded(self):
+        ws = ind._LifecycleEventClient("ws+unix:///nonexistent.socket")
+        self.addCleanup(ws.sock.close)
+        self.assertIn("origin", [h.lower() for h in ws.exclude_headers])
+        ws.on_event = mock.Mock()
+        ws.received_message(types.SimpleNamespace(data=b'{"type": "lifecycle"}'))
+        ws.received_message(types.SimpleNamespace(data=b"not json"))
+        ws.on_event.assert_called_once_with({"type": "lifecycle"})
+
 
 class HelpersTest(unittest.TestCase):
+    def test_instance_changes(self):
+        previous = {"a": "running", "b": "stopped", "c": "frozen", "gone": "running"}
+        current = {
+            "a": "stopped",
+            "b": "running",
+            "c": "running",
+            "new": "stopped",
+            "newrun": "running",
+        }
+        self.assertEqual(
+            ind._instance_changes(previous, current),
+            [
+                ("a", ["stopped"]),
+                ("b", ["started"]),
+                ("new", ["created"]),
+                ("newrun", ["created", "started"]),
+            ],
+        )
+
+    def test_notification_text(self):
+        text = ind._notification_text
+        self.assertEqual(text("foo", ["created"]), ("New Machine: foo", ""))
+        self.assertEqual(
+            text("foo", ["created", "started", "stopped"]),
+            ("New Machine: foo", "Created, started and stopped"),
+        )
+        self.assertEqual(text("z:foo", ["started"]), ("Started: z:foo", ""))
+        self.assertEqual(
+            text("foo", ["started", "stopped"]),
+            ("Stopped: foo", "Started, then stopped"),
+        )
+
     def test_instance_label(self):
         self.assertEqual(ind._instance_label(None, "web"), "web")
         self.assertEqual(ind._instance_label("zeta", "web"), "zeta:web")
