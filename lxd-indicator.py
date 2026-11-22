@@ -1101,9 +1101,9 @@ class LXDIndicatorApp:
         refresh_item.connect("activate", lambda _w: self._refresh_event.set())
         self.menu.append(refresh_item)
 
-        quit_item = Gtk.MenuItem(label="Quit")
-        quit_item.connect("activate", self._on_quit)
-        self.menu.append(quit_item)
+        remove_item = Gtk.MenuItem(label="Remove")
+        remove_item.connect("activate", self._on_remove)
+        self.menu.append(remove_item)
 
         self.menu.show_all()
         return False  # one-shot when used with GLib.idle_add
@@ -1130,8 +1130,8 @@ class LXDIndicatorApp:
         )
         self._terminal_windows.add(window)
 
-    def _on_quit(self, _widget):
-        # Quitting is the way to say "don't start me any more": logging out
+    def _on_remove(self, _widget):
+        # "Remove" is the way to say "don't start me any more": logging out
         # with the indicator running leaves it to start again at login.
         disable_autostart()
         Gtk.main_quit()

@@ -292,12 +292,19 @@ class AutostartTest(IndicatorTestCase):
             ind.disable_autostart()
         self.assertTrue(os.path.exists(self.file))
 
-    def test_quit_disables_autostart(self):
+    def test_remove_disables_autostart_and_quits(self):
         ind.enable_autostart()
         ind.Gtk.main_quit.reset_mock()
-        self.app._on_quit(mock.sentinel.widget)
+        self.app._on_remove(mock.sentinel.widget)
         self.assertFalse(os.path.exists(self.file))
         ind.Gtk.main_quit.assert_called_once_with()
+
+    def test_menu_offers_remove_instead_of_quit(self):
+        ind.Gtk.MenuItem.reset_mock()
+        self.app._build_or_update_menu()
+        labels = [c.kwargs.get("label") for c in ind.Gtk.MenuItem.call_args_list]
+        self.assertIn("Remove", labels)
+        self.assertNotIn("Quit", labels)
 
     def test_no_start_at_login_menu_item(self):
         ind.Gtk.CheckMenuItem.reset_mock()
