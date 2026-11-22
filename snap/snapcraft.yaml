@@ -20,7 +20,7 @@ description: |
   Your user must also be a member of the `lxd` group.
 
   Each running instance's menu has a Terminal item, which opens a shell in
-  the instance (like `lxc exec <instance> -- bash`) in a terminal window.
+  the instance (like `lxc shell <instance>`) in a terminal window.
 
   Instances on the remotes configured with `lxc remote add` are listed too,
   as `remote:name`. To let the indicator read the lxc configuration (the

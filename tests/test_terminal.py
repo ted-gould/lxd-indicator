@@ -150,10 +150,8 @@ class TerminalSessionTest(unittest.TestCase):
             },
         )
 
-    def test_shell_command_prefers_bash(self):
-        self.assertEqual(ind.TERMINAL_COMMAND[:2], ["sh", "-c"])
-        self.assertIn("exec bash -l", ind.TERMINAL_COMMAND[2])
-        self.assertIn("exec sh -l", ind.TERMINAL_COMMAND[2])
+    def test_shell_command_is_a_login_shell_like_lxc_shell(self):
+        self.assertEqual(ind.TERMINAL_COMMAND, ["su", "-l"])
 
     def test_start_connects_control_then_data_websockets(self):
         session = self.make_session()

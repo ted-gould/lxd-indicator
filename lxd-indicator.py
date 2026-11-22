@@ -81,13 +81,9 @@ AUTOSTART_DIR = os.path.join(
 )
 AUTOSTART_FILE = os.path.join(AUTOSTART_DIR, f"{APP_NAME}.desktop")
 
-# The shell started by "Terminal": bash like `lxc exec <instance> -- bash`,
-# falling back to sh for images without bash (Alpine, BusyBox).
-TERMINAL_COMMAND = [
-    "sh",
-    "-c",
-    "if command -v bash >/dev/null 2>&1; then exec bash -l; fi; exec sh -l",
-]
+# The shell started by "Terminal": a login shell for root, as `lxc shell`
+# starts (its alias is `exec @ARGS@ -- su -l`). su keeps TERM.
+TERMINAL_COMMAND = ["su", "-l"]
 TERMINAL_TERM = "xterm-256color"  # what VTE emulates
 TERMINAL_SCROLLBACK = 10000  # lines
 SIGHUP = 1
@@ -269,7 +265,7 @@ class _ExecWebsocket(WebSocketClient):
 
 
 class TerminalSession:
-    """An interactive shell in an instance, like `lxc exec <instance> -- bash`.
+    """An interactive shell in an instance, like `lxc shell <instance>`.
 
     Runs the command through the LXD exec API, so it needs only the LXD
     connection the indicator already has. The terminal's input goes in with
