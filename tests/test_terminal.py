@@ -615,32 +615,47 @@ class ExecWebsocketTest(unittest.TestCase):
 
 
 class TerminalMenuTest(IndicatorTestCase):
-    def test_terminal_needs_a_running_instance_and_vte(self):
-        self.assertTrue(ind._can_open_terminal("running"))
-        for status in ("stopped", "frozen", "starting"):
-            self.assertFalse(ind._can_open_terminal(status))
-        with mock.patch.object(ind, "Vte", None):
-            self.assertFalse(ind._can_open_terminal("running"))
-
-    def test_terminal_menu_item_per_instance(self):
-        app = self.make_app(
-            FakeServers({LOCAL: [FakeInstance("web"), FakeInstance("db", "Stopped")]})
-        )
+    def terminal_items(self, instances):
+        """Builds the menu; returns {label: sensitive} for the terminal items."""
+        app = self.make_app(FakeServers({LOCAL: instances}))
         app._refresh_once()
-        ind.Gtk.MenuItem.reset_mock()
-        app._build_or_update_menu()
-        labels = [
-            c.kwargs.get("label") for c in ind.Gtk.MenuItem.call_args_list if c.kwargs
-        ]
-        self.assertEqual(labels.count("Terminal"), 1)  # web is running
-        self.assertEqual(labels.count("Start & Terminal"), 1)  # db is stopped
+        items = []
 
-    def test_start_and_terminal_only_for_stopped_instances_with_vte(self):
-        self.assertTrue(ind._needs_start_for_terminal("stopped"))
-        for status in ("running", "frozen", "starting", "error"):
-            self.assertFalse(ind._needs_start_for_terminal(status))
+        def menu_item(label=None):
+            item = mock.Mock(label=label)
+            items.append(item)
+            return item
+
+        with mock.patch.object(ind.Gtk, "MenuItem", menu_item):
+            app._build_or_update_menu()
+        return [
+            (i.label, i.set_sensitive.call_args.args[0])
+            for i in items
+            if i.label and "Terminal" in i.label
+        ]
+
+    INSTANCES = [
+        FakeInstance("a-run"),
+        FakeInstance("b-off", "Stopped"),
+        FakeInstance("c-ice", "Frozen"),
+        FakeInstance("d-busy", "Starting"),
+    ]
+
+    def test_terminal_item_follows_the_instance_status(self):
+        self.assertEqual(
+            self.terminal_items(self.INSTANCES),
+            [
+                ("Terminal", True),
+                ("Start & Terminal", True),
+                ("Terminal", False),
+                ("Terminal", False),
+            ],
+        )
+
+    def test_terminal_items_are_disabled_without_vte(self):
         with mock.patch.object(ind, "Vte", None):
-            self.assertFalse(ind._needs_start_for_terminal("stopped"))
+            items = self.terminal_items(self.INSTANCES)
+        self.assertEqual([sensitive for _, sensitive in items], [False] * 4)
 
     def test_start_and_terminal_starts_then_opens_a_terminal(self):
         db = FakeInstance("db", "Stopped")
@@ -649,20 +664,17 @@ class TerminalMenuTest(IndicatorTestCase):
         with mock.patch.object(ind.GLib, "idle_add") as idle_add:
             app._start_then_open_terminal(None, "db")
         self.assertEqual(db.actions, ["start"])
-        idle_add.assert_called_once_with(app._open_terminal_idle, None, "db")
-        with mock.patch.object(ind, "TerminalWindow") as window_class:
-            self.assertFalse(app._open_terminal_idle(None, "db"))
-        self.assertEqual(window_class.call_args.args[1:], (None, "db"))
+        idle_add.assert_called_once_with(app._on_open_terminal, None, "db")
 
     def test_start_and_terminal_failed_start_opens_no_terminal(self):
         app = self.make_app(FakeServers({LOCAL: []}))
         app._refresh_once()
-        with mock.patch.object(ind.GLib, "idle_add") as idle_add:
-            app._start_then_open_terminal(None, "gone")
-        self.assertNotIn(
-            mock.call(app._open_terminal_idle, None, "gone"), idle_add.call_args_list
-        )
-        self.assertIn("gone", app.lxd_error_message)
+        app.notifier = mock.Mock()
+        with mock.patch.object(ind.GLib, "idle_add", lambda f, *a: f(*a)):
+            with mock.patch.object(ind, "TerminalWindow") as window_class:
+                app._start_then_open_terminal(None, "gone")
+        window_class.assert_not_called()
+        app.notifier.action_failed.assert_called_once()
 
     def test_open_terminal_uses_that_remotes_client(self):
         app = self.make_app(
@@ -671,26 +683,32 @@ class TerminalMenuTest(IndicatorTestCase):
             )
         )
         app._refresh_once()
-        with mock.patch.object(ind, "TerminalWindow") as window_class:
-            app._on_open_terminal("zeta", "a", None)
-            app._on_open_terminal(None, "web", None)
+        with mock.patch.object(
+            ind, "TerminalWindow", side_effect=lambda *a, **k: mock.Mock()
+        ) as window_class:
+            app._on_open_terminal("zeta", "a")
+            app._on_open_terminal(None, "web")
         zeta_call, local_call = window_class.call_args_list
         self.assertIs(zeta_call.args[0], app.remote_clients["zeta"][1])
         self.assertEqual(zeta_call.args[1:], ("zeta", "a"))
         self.assertIs(local_call.args[0], app.lxd_client)
-        self.assertEqual(len(app._terminal_windows), 1)  # the same mock, twice
+        self.assertEqual(len(app._terminal_windows), 2)
 
-        # Closing the window lets it go.
-        zeta_call.kwargs["on_destroy"](window_class.return_value)
-        self.assertEqual(app._terminal_windows, set())
+        # Closing a window lets it go.
+        zeta_window = next(iter(app._terminal_windows))
+        zeta_call.kwargs["on_destroy"](zeta_window)
+        self.assertEqual(len(app._terminal_windows), 1)
 
     def test_open_terminal_without_connection_reports_error(self):
         app = self.make_app(FakeServers({}, unreachable={LOCAL}))
         app._refresh_once()
+        app.notifier = mock.Mock()
         with mock.patch.object(ind, "TerminalWindow") as window_class:
-            app._on_open_terminal("gone", "web", None)
+            app._on_open_terminal("gone", "web")
         window_class.assert_not_called()
-        self.assertIn("gone:web", app.lxd_error_message)
+        app.notifier.action_failed.assert_called_once_with(
+            "gone", "web", "Open Terminal", "Not connected."
+        )
 
 
 class TerminalWindowTest(unittest.TestCase):
