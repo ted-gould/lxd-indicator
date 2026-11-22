@@ -1097,19 +1097,9 @@ class LXDIndicatorApp:
         if instances:
             self.menu.append(Gtk.SeparatorMenuItem())
 
-        refresh_item = Gtk.MenuItem(label="Refresh Now")
-        refresh_item.connect("activate", lambda _w: self._refresh_event.set())
-        self.menu.append(refresh_item)
-
-        if SNAP_DIR:  # the launcher it copies is the snap's
-            autostart_item = Gtk.CheckMenuItem(label="Start at Login")
-            autostart_item.set_active(os.path.exists(AUTOSTART_FILE))
-            autostart_item.connect("toggled", self._on_autostart_toggled)
-            self.menu.append(autostart_item)
-
-        quit_item = Gtk.MenuItem(label="Quit")
-        quit_item.connect("activate", lambda _w: Gtk.main_quit())
-        self.menu.append(quit_item)
+        remove_item = Gtk.MenuItem(label="Remove")
+        remove_item.connect("activate", self._on_remove)
+        self.menu.append(remove_item)
 
         self.menu.show_all()
         return False  # one-shot when used with GLib.idle_add
@@ -1136,22 +1126,38 @@ class LXDIndicatorApp:
         )
         self._terminal_windows.add(window)
 
-    def _on_autostart_toggled(self, widget):
-        # snapd's `autostart:` support launches the app at login when this
-        # file exists in $SNAP_USER_DATA/.config/autostart.
-        try:
-            if widget.get_active():
-                os.makedirs(AUTOSTART_DIR, exist_ok=True)
-                shutil.copyfile(
-                    os.path.join(SNAP_DIR, "meta", "gui", f"{APP_NAME}.desktop"),
-                    AUTOSTART_FILE,
-                )
-            elif os.path.exists(AUTOSTART_FILE):
-                os.remove(AUTOSTART_FILE)
-        except OSError as e:
-            print(f"Failed to update autostart: {e}")
-            # Show what's really in place (toggling to it again is a no-op).
-            widget.set_active(os.path.exists(AUTOSTART_FILE))
+    def _on_remove(self, _widget):
+        # "Remove" is the way to say "don't start me any more": logging out
+        # with the indicator running leaves it to start again at login.
+        disable_autostart()
+        Gtk.main_quit()
+
+
+# snapd's `autostart:` support launches the app at login when this file
+# exists in $SNAP_USER_DATA/.config/autostart. Both are no-ops outside the
+# snap, whose launcher is the one copied.
+def enable_autostart():
+    if not SNAP_DIR or os.path.exists(AUTOSTART_FILE):
+        return
+    try:
+        os.makedirs(AUTOSTART_DIR, exist_ok=True)
+        shutil.copyfile(
+            os.path.join(SNAP_DIR, "meta", "gui", f"{APP_NAME}.desktop"),
+            AUTOSTART_FILE,
+        )
+    except OSError as e:
+        print(f"Failed to enable autostart: {e}")
+
+
+def disable_autostart():
+    if not SNAP_DIR:
+        return
+    try:
+        os.remove(AUTOSTART_FILE)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"Failed to disable autostart: {e}")
 
 
 if __name__ == "__main__":
@@ -1164,5 +1170,6 @@ if __name__ == "__main__":
         version = f"{Vte.get_major_version()}.{Vte.get_minor_version()}"
         print(f"Terminal support enabled (VTE {version}).")
     signal.signal(signal.SIGINT, signal.SIG_DFL)
+    enable_autostart()
     app = LXDIndicatorApp()
     Gtk.main()

@@ -254,44 +254,64 @@ class AutostartTest(IndicatorTestCase):
             self.addCleanup(patch.stop)
         self.app = self.make_app(FakeServers({LOCAL: []}))
 
-    def toggle(self, active):
-        widget = mock.Mock()
-        widget.get_active.return_value = active
-        self.app._on_autostart_toggled(widget)
-        return widget
-
     def test_enabling_copies_the_snaps_launcher(self):
-        self.toggle(True)
+        ind.enable_autostart()
         with open(self.file) as f:
             self.assertEqual(f.read(), "[Desktop Entry]\n")
 
-    def test_disabling_removes_it(self):
-        self.toggle(True)
-        self.toggle(False)
-        self.assertFalse(os.path.exists(self.file))
-        self.toggle(False)  # already gone: nothing to do
+    def test_enabling_keeps_an_existing_launcher(self):
+        os.makedirs(self.dir)
+        with open(self.file, "w") as f:
+            f.write("edited\n")
+        ind.enable_autostart()
+        with open(self.file) as f:
+            self.assertEqual(f.read(), "edited\n")
 
-    def test_failure_puts_the_checkbox_back(self):
+    def test_enabling_failure_is_logged(self):
         with mock.patch.object(ind.shutil, "copyfile", side_effect=PermissionError):
-            widget = self.toggle(True)
-        widget.set_active.assert_called_once_with(False)
-        print.assert_any_call("Failed to update autostart: ")
+            ind.enable_autostart()
+        print.assert_any_call("Failed to enable autostart: ")
 
-    def check_items(self):
+    def test_disabling_removes_it(self):
+        ind.enable_autostart()
+        ind.disable_autostart()
+        self.assertFalse(os.path.exists(self.file))
+        ind.disable_autostart()  # already gone: nothing to do
+
+    def test_disabling_failure_is_logged(self):
+        with mock.patch.object(ind.os, "remove", side_effect=PermissionError):
+            ind.disable_autostart()
+        print.assert_any_call("Failed to disable autostart: ")
+
+    def test_nothing_happens_outside_the_snap(self):
+        with mock.patch.object(ind, "SNAP_DIR", None):
+            ind.enable_autostart()
+            self.assertFalse(os.path.exists(self.file))
+        ind.enable_autostart()
+        with mock.patch.object(ind, "SNAP_DIR", None):
+            ind.disable_autostart()
+        self.assertTrue(os.path.exists(self.file))
+
+    def test_remove_disables_autostart_and_quits(self):
+        ind.enable_autostart()
+        ind.Gtk.main_quit.reset_mock()
+        self.app._on_remove(mock.sentinel.widget)
+        self.assertFalse(os.path.exists(self.file))
+        ind.Gtk.main_quit.assert_called_once_with()
+
+    def test_menu_offers_remove_instead_of_quit(self):
+        ind.Gtk.MenuItem.reset_mock()
+        self.app._build_or_update_menu()
+        labels = [c.kwargs.get("label") for c in ind.Gtk.MenuItem.call_args_list]
+        self.assertIn("Remove", labels)
+        self.assertNotIn("Quit", labels)
+        # Events and the periodic refresh keep it current; no manual refresh.
+        self.assertNotIn("Refresh Now", labels)
+
+    def test_no_start_at_login_menu_item(self):
         ind.Gtk.CheckMenuItem.reset_mock()
         self.app._build_or_update_menu()
-        return ind.Gtk.CheckMenuItem.call_args_list
-
-    def test_menu_item_shows_whether_it_is_enabled(self):
-        self.assertEqual(self.check_items(), [mock.call(label="Start at Login")])
-        ind.Gtk.CheckMenuItem.return_value.set_active.assert_called_with(False)
-        self.toggle(True)
-        self.check_items()
-        ind.Gtk.CheckMenuItem.return_value.set_active.assert_called_with(True)
-
-    def test_no_menu_item_outside_the_snap(self):
-        with mock.patch.object(ind, "SNAP_DIR", None):
-            self.assertEqual(self.check_items(), [])
+        ind.Gtk.CheckMenuItem.assert_not_called()
 
 
 class NotifierDBusTest(unittest.TestCase):
