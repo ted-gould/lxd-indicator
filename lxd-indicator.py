@@ -72,13 +72,12 @@ REQUIRED_PLUGS = ("lxd",)
 RESPONSE_APP_CENTER = 1
 # In the snap the icons sit at $SNAP; in a source checkout, next to this file.
 ICON_DIR = SNAP_DIR or os.path.dirname(os.path.abspath(__file__))
-# Panel icon: a symbolic icon, looked up by name in ICON_THEME_DIR. The panel
-# recolors symbolic icons to match its own text, so the glyph stays visible on
-# light and dark panels alike, whatever the application theme is.
-ICON_THEME_DIR = os.path.join(ICON_DIR, "icons")
-ICON_NORMAL = "lxd-indicator-symbolic"
-ICON_NORMAL_FILE = os.path.join(
-    ICON_THEME_DIR, "hicolor", "scalable", "apps", f"{ICON_NORMAL}.svg"
+# Panel icon: a symbolic icon, passed to the panel as a file path. Hosts look
+# a name up in an app's own icon directory unreliably, but load paths as they
+# do the alert icon; a file named *-symbolic.svg is still recolored to match
+# the panel's text, so it stays visible on light and dark panels alike.
+ICON_NORMAL = os.path.join(
+    ICON_DIR, "icons", "hicolor", "scalable", "apps", "lxd-indicator-symbolic.svg"
 )
 ICON_ALERT = os.path.join(ICON_DIR, "lxd_logo.svg")  # orange, full color
 
@@ -861,8 +860,6 @@ class LXDIndicatorApp:
             ICON_NORMAL,
             AppIndicator3.IndicatorCategory.SYSTEM_SERVICES,
         )
-        # The panel, not this process, loads the icon: tell it where to look.
-        self.indicator.set_icon_theme_path(ICON_THEME_DIR)
         self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
         self.indicator.set_title("LXD Indicator")
 
@@ -1272,7 +1269,7 @@ def main():
     if not ensure_required_plugs():
         print("Exiting: the lxd interface is not connected.")
         return 1
-    for icon_path in (ICON_NORMAL_FILE, ICON_ALERT):
+    for icon_path in (ICON_NORMAL, ICON_ALERT):
         if not os.path.exists(icon_path):
             print(f"Warning: icon not found at {icon_path}")
     if Vte is None:
