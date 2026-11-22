@@ -10,6 +10,7 @@ import shutil
 import signal
 import ssl
 import subprocess
+import sys
 import threading
 import time
 from urllib.parse import quote, urlparse
@@ -64,6 +65,9 @@ DESKTOP_ENTRY = (
 )
 
 SNAP_DIR = os.environ.get("SNAP")
+# Snap plugs the indicator can't work without; checked at startup. Each is
+# connected to the slot of the same name (lxd-indicator:lxd -> lxd:lxd).
+REQUIRED_PLUGS = ("lxd",)
 # In the snap the icons sit at $SNAP; in a source checkout, next to this file.
 ICON_DIR = SNAP_DIR or os.path.dirname(os.path.abspath(__file__))
 # Panel icon: a symbolic icon, looked up by name in ICON_THEME_DIR. The panel
@@ -144,13 +148,60 @@ def _snap_plug_connected(plug):
         return None
 
 
+def _connect_command(plug, slot=""):
+    """The command that connects one of this snap's plugs."""
+    snap = os.environ.get("SNAP_INSTANCE_NAME") or "lxd-indicator"
+    return f"sudo snap connect {snap}:{plug} {slot}".rstrip()
+
+
+def _missing_required_plugs():
+    """The REQUIRED_PLUGS known to be disconnected (none outside the snap)."""
+    return [plug for plug in REQUIRED_PLUGS if _snap_plug_connected(plug) is False]
+
+
+def ensure_required_plugs():
+    """Returns True once the required plugs are connected.
+
+    While any is known to be disconnected, a dialog says how to connect it,
+    offering to check again; False if the user gives up. snapd has no way
+    for a snap to ask for its own connection (snapctl can only query), so
+    the user has to run the command.
+    """
+    missing = _missing_required_plugs()
+    while missing:
+        print(f"Error: required interfaces not connected: {', '.join(missing)}")
+        dialog = Gtk.MessageDialog(
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.NONE,
+            text="LXD Indicator can't access LXD",
+        )
+        dialog.set_title("LXD Indicator")
+        dialog.format_secondary_text(
+            "The snap's lxd interface isn't connected. Connect it by running "
+            "this in a terminal, then choose Check Again:"
+        )
+        commands = Gtk.Label(
+            label="\n".join(_connect_command(plug, plug) for plug in missing)
+        )
+        commands.set_selectable(True)
+        commands.get_style_context().add_class("monospace")
+        dialog.get_message_area().pack_start(commands, False, False, 0)
+        commands.show()
+        dialog.add_button("_Quit", Gtk.ResponseType.CLOSE)
+        dialog.add_button("_Check Again", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        response = dialog.run()
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK:
+            return False
+        missing = _missing_required_plugs()
+    return True
+
+
 def _diagnose_connection_failure(socket_path, error):
     """Turns a low-level connection failure into an actionable message."""
     if _snap_plug_connected("lxd") is False:
-        return (
-            "LXD interface not connected. Run: "
-            "sudo snap connect lxd-indicator:lxd lxd"
-        )
+        return "LXD interface not connected. Run: " + _connect_command("lxd", "lxd")
     if not os.path.exists(socket_path):
         return f"LXD socket not found at {socket_path}. Is LXD installed and running?"
     if "Permission denied" in str(error) or not os.access(
@@ -854,9 +905,8 @@ class LXDIndicatorApp:
             config_dir, remotes = _load_remotes()
         except (OSError, yaml.YAMLError) as e:
             if _snap_plug_connected("lxc-config") is False:
-                message = (
-                    "Can't read the lxc config. Run: "
-                    "sudo snap connect lxd-indicator:lxc-config"
+                message = "Can't read the lxc config. Run: " + _connect_command(
+                    "lxc-config"
                 )
             else:
                 message = f"Can't read the lxc config: {e}"
@@ -1160,7 +1210,11 @@ def disable_autostart():
         print(f"Failed to disable autostart: {e}")
 
 
-if __name__ == "__main__":
+def main():
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    if not ensure_required_plugs():
+        print("Exiting: the lxd interface is not connected.")
+        return 1
     for icon_path in (ICON_NORMAL_FILE, ICON_ALERT):
         if not os.path.exists(icon_path):
             print(f"Warning: icon not found at {icon_path}")
@@ -1169,7 +1223,11 @@ if __name__ == "__main__":
     else:
         version = f"{Vte.get_major_version()}.{Vte.get_minor_version()}"
         print(f"Terminal support enabled (VTE {version}).")
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
     enable_autostart()
-    app = LXDIndicatorApp()
+    app = LXDIndicatorApp()  # noqa: F841 -- kept alive while GTK runs
     Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
