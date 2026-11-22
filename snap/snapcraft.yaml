@@ -1,7 +1,13 @@
 name: lxd-indicator
 base: core24
 version: '0.2'
+title: LXD Indicator
 summary: LXD instance status indicator
+license: GPL-3.0-only
+contact: https://github.com/ted-gould/lxd-indicator/issues
+issues: https://github.com/ted-gould/lxd-indicator/issues
+source-code: https://github.com/ted-gould/lxd-indicator
+website: https://github.com/ted-gould/lxd-indicator
 description: |
   A simple system tray indicator for displaying the status of LXD instances
   and performing basic actions.
