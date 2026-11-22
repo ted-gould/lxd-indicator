@@ -458,7 +458,10 @@ if __name__ == "__main__":
 
 class RequiredPlugsTest(unittest.TestCase):
     def setUp(self):
-        ind.Gtk.reset_mock()
+        ind.Gtk.MessageDialog.reset_mock(return_value=True)
+        ind.Gtk.Label.reset_mock()
+        ind.Gtk.main.reset_mock()
+        ind.Gio.AppInfo.launch_default_for_uri.reset_mock(side_effect=True)
         self.dialog = ind.Gtk.MessageDialog.return_value
         patch = mock.patch.object(ind, "_snap_plug_connected")
         self.plug = patch.start()
@@ -483,6 +486,31 @@ class RequiredPlugsTest(unittest.TestCase):
         self.dialog.run.return_value = ind.Gtk.ResponseType.OK
         self.assertTrue(ind.ensure_required_plugs())
         self.assertEqual(self.dialog.run.call_count, 2)
+
+    def test_app_center_keeps_the_dialog_open(self):
+        self.plug.side_effect = [False, True]
+        self.dialog.run.side_effect = [
+            ind.RESPONSE_APP_CENTER,
+            ind.Gtk.ResponseType.OK,
+        ]
+        with mock.patch.dict(os.environ, {"SNAP_NAME": "lxd-indicator"}):
+            self.assertTrue(ind.ensure_required_plugs())
+        ind.Gio.AppInfo.launch_default_for_uri.assert_called_once_with(
+            "snap://lxd-indicator", None
+        )
+        ind.Gtk.MessageDialog.assert_called_once()
+        self.dialog.destroy.assert_called_once_with()
+
+    def test_app_center_failure_is_logged(self):
+        launch = ind.Gio.AppInfo.launch_default_for_uri
+        launch.side_effect = FakeGLibError("no handler")
+        self.addCleanup(setattr, launch, "side_effect", None)
+        with (
+            mock.patch.object(ind.GLib, "Error", FakeGLibError),
+            mock.patch("builtins.print") as printed,
+        ):
+            ind._open_app_center()
+        printed.assert_called_once_with("Failed to open App Center: no handler")
 
     def test_main_exits_without_starting(self):
         with (

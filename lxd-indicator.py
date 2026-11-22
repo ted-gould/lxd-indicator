@@ -68,6 +68,8 @@ SNAP_DIR = os.environ.get("SNAP")
 # Snap plugs the indicator can't work without; checked at startup. Each is
 # connected to the slot of the same name (lxd-indicator:lxd -> lxd:lxd).
 REQUIRED_PLUGS = ("lxd",)
+# Dialog response for the missing-plugs dialog's "Open App Center" button.
+RESPONSE_APP_CENTER = 1
 # In the snap the icons sit at $SNAP; in a source checkout, next to this file.
 ICON_DIR = SNAP_DIR or os.path.dirname(os.path.abspath(__file__))
 # Panel icon: a symbolic icon, looked up by name in ICON_THEME_DIR. The panel
@@ -159,38 +161,57 @@ def _missing_required_plugs():
     return [plug for plug in REQUIRED_PLUGS if _snap_plug_connected(plug) is False]
 
 
+def _open_app_center():
+    """Opens the snap's App Center page, where its permissions can be changed."""
+    snap = os.environ.get("SNAP_NAME") or "lxd-indicator"
+    try:
+        # In the snap this goes through snapd's launcher, which allows snap://.
+        Gio.AppInfo.launch_default_for_uri(f"snap://{snap}", None)
+    except GLib.Error as e:
+        print(f"Failed to open App Center: {e.message}")
+
+
+def _required_plugs_dialog(missing):
+    dialog = Gtk.MessageDialog(
+        message_type=Gtk.MessageType.ERROR,
+        buttons=Gtk.ButtonsType.NONE,
+        text="LXD Indicator can't access LXD",
+    )
+    dialog.set_title("LXD Indicator")
+    dialog.format_secondary_text(
+        "The snap's lxd interface isn't connected. Connect it by running "
+        "this in a terminal, or in App Center, then choose Check Again:"
+    )
+    commands = Gtk.Label(
+        label="\n".join(_connect_command(plug, plug) for plug in missing)
+    )
+    commands.set_selectable(True)
+    commands.get_style_context().add_class("monospace")
+    dialog.get_message_area().pack_start(commands, False, False, 0)
+    commands.show()
+    dialog.add_button("_Quit", Gtk.ResponseType.CLOSE)
+    dialog.add_button("Open _App Center", RESPONSE_APP_CENTER)
+    dialog.add_button("_Check Again", Gtk.ResponseType.OK)
+    dialog.set_default_response(Gtk.ResponseType.OK)
+    return dialog
+
+
 def ensure_required_plugs():
     """Returns True once the required plugs are connected.
 
     While any is known to be disconnected, a dialog says how to connect it,
-    offering to check again; False if the user gives up. snapd has no way
-    for a snap to ask for its own connection (snapctl can only query), so
-    the user has to run the command.
+    offering App Center and a re-check; False if the user gives up. snapd
+    has no way for a snap to ask for its own connection (snapctl can only
+    query), so the user has to make it.
     """
     missing = _missing_required_plugs()
     while missing:
         print(f"Error: required interfaces not connected: {', '.join(missing)}")
-        dialog = Gtk.MessageDialog(
-            message_type=Gtk.MessageType.ERROR,
-            buttons=Gtk.ButtonsType.NONE,
-            text="LXD Indicator can't access LXD",
-        )
-        dialog.set_title("LXD Indicator")
-        dialog.format_secondary_text(
-            "The snap's lxd interface isn't connected. Connect it by running "
-            "this in a terminal, then choose Check Again:"
-        )
-        commands = Gtk.Label(
-            label="\n".join(_connect_command(plug, plug) for plug in missing)
-        )
-        commands.set_selectable(True)
-        commands.get_style_context().add_class("monospace")
-        dialog.get_message_area().pack_start(commands, False, False, 0)
-        commands.show()
-        dialog.add_button("_Quit", Gtk.ResponseType.CLOSE)
-        dialog.add_button("_Check Again", Gtk.ResponseType.OK)
-        dialog.set_default_response(Gtk.ResponseType.OK)
+        dialog = _required_plugs_dialog(missing)
         response = dialog.run()
+        while response == RESPONSE_APP_CENTER:
+            _open_app_center()
+            response = dialog.run()
         dialog.destroy()
         if response != Gtk.ResponseType.OK:
             return False
