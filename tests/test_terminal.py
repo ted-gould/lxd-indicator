@@ -717,12 +717,13 @@ class TerminalWindowTest(unittest.TestCase):
         self.callbacks()["on_exit"](0)
         self.window.window.destroy.assert_called_once()
 
-    def test_failed_exit_keeps_the_window_open_with_a_note(self):
+    def test_failed_exit_closes_the_window(self):
         self.callbacks()["on_exit"](127)
-        self.window.window.destroy.assert_not_called()
-        self.assertIn(b"status 127", self.terminal.feed.call_args.args[0])
+        self.window.window.destroy.assert_called_once()
+
+    def test_lost_connection_closes_the_window(self):
         self.callbacks()["on_exit"](None)
-        self.assertIn(b"Connection", self.terminal.feed.call_args.args[0])
+        self.window.window.destroy.assert_called_once()
 
     def test_start_failure_is_shown_in_the_terminal(self):
         self.session.start.side_effect = ind.LXDAPIException(
@@ -742,6 +743,67 @@ class TerminalWindowTest(unittest.TestCase):
         self.callbacks()["on_exit"](0)
         self.terminal.feed.assert_not_called()
         self.window.window.destroy.assert_not_called()
+
+
+class TerminalWindowLogoutTest(unittest.TestCase):
+    """The window with a real TerminalSession on fake websockets."""
+
+    def setUp(self):
+        factory = self.factory = FakeWebsocketFactory()
+        real_session = ind.TerminalSession
+        patches = [
+            mock.patch("builtins.print"),
+            mock.patch.object(
+                ind,
+                "TerminalSession",
+                lambda *a, **kw: real_session(*a, websocket_factory=factory, **kw),
+            ),
+            # Run the session's thread and idle callbacks right away.
+            mock.patch.object(
+                ind.threading,
+                "Thread",
+                lambda target, daemon: mock.Mock(start=target),
+            ),
+            mock.patch.object(ind.GLib, "idle_add", side_effect=lambda f, *a: f(*a)),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        ind.Gtk.reset_mock()
+        ind.Vte.reset_mock()
+        ind.Vte.Terminal.return_value.get_column_count.return_value = 80
+        ind.Vte.Terminal.return_value.get_row_count.return_value = 24
+        self.client = make_client()
+        self.window = ind.TerminalWindow(self.client, None, "web")
+        # GTK is mocked, so pass the destroy signal on by hand.
+        gtk_window = self.window.window
+        gtk_window.destroy.side_effect = lambda: self.window._on_destroy(gtk_window)
+
+    def exit_status(self, code):
+        operation = self.client.api.operations.__getitem__.return_value
+        operation.wait.get.return_value.json.return_value = {
+            "metadata": {"metadata": {"return": code}}
+        }
+
+    def test_ctrl_d_logs_out_and_closes_the_window(self):
+        # Ctrl+D makes the shell exit with the last command's status.
+        self.exit_status(1)
+        self.window._on_commit(self.window.terminal, "\x04", 1)
+        self.assertIn((b"\x04", True), self.factory.data.sent)
+        self.window.window.destroy.assert_not_called()
+
+        self.factory.data.on_closed()  # the shell is gone: LXD closes the data
+        self.window.window.destroy.assert_called_once()
+        self.assertTrue(self.factory.control.closed)
+        self.assertTrue(self.factory.data.closed)
+        # The shell had already exited: no one to hang up.
+        self.assertEqual(control_messages(self.factory.control), [])
+
+    def test_dropped_connection_closes_the_window(self):
+        operation = self.client.api.operations.__getitem__.return_value
+        operation.wait.get.side_effect = ConnectionError("machine went away")
+        self.factory.data.on_closed()
+        self.window.window.destroy.assert_called_once()
 
 
 if __name__ == "__main__":
