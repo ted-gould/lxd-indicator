@@ -496,15 +496,15 @@ class TerminalWindow:
         return False
 
     def _on_exit(self, code):
+        # Like a terminal app, close once the shell is gone: whether it was
+        # logged out of (Ctrl+D, `exit`), failed or the connection dropped.
         if self._destroyed:
             return False
-        if code == 0:
-            # Like a terminal app, close once the shell exits normally.
-            self.window.destroy()
-        elif code is None:
-            self._show_message("Connection to the instance closed")
-        else:
-            self._show_message(f"Shell exited with status {code}")
+        if code is None:
+            print(f"Terminal for {self.label}: connection closed")
+        elif code != 0:
+            print(f"Terminal for {self.label}: shell exited with status {code}")
+        self.window.destroy()
         return False
 
     def _on_commit(self, _terminal, text, _size):
