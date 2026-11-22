@@ -82,8 +82,13 @@ AUTOSTART_DIR = os.path.join(
 AUTOSTART_FILE = os.path.join(AUTOSTART_DIR, f"{APP_NAME}.desktop")
 
 # The shell started by "Terminal": a login shell for root, as `lxc shell`
-# starts (its alias is `exec @ARGS@ -- su -l`). su keeps TERM.
-TERMINAL_COMMAND = ["su", "-l"]
+# starts (its alias is `exec @ARGS@ -- su -l`); su keeps TERM. Images
+# without su get a plain login sh instead.
+TERMINAL_COMMAND = [
+    "sh",
+    "-c",
+    "if command -v su >/dev/null 2>&1; then exec su -l; fi; exec sh -l",
+]
 TERMINAL_TERM = "xterm-256color"  # what VTE emulates
 TERMINAL_SCROLLBACK = 10000  # lines
 SIGHUP = 1

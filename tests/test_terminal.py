@@ -13,6 +13,7 @@ import json
 import os
 import socket
 import ssl
+import subprocess
 import tempfile
 import threading
 import types
@@ -151,7 +152,42 @@ class TerminalSessionTest(unittest.TestCase):
         )
 
     def test_shell_command_is_a_login_shell_like_lxc_shell(self):
-        self.assertEqual(ind.TERMINAL_COMMAND, ["su", "-l"])
+        self.assertEqual(ind.TERMINAL_COMMAND[:2], ["sh", "-c"])
+        self.assertIn("exec su -l", ind.TERMINAL_COMMAND[2])
+
+    def test_shell_command_falls_back_to_sh_without_su(self):
+        script = ind.TERMINAL_COMMAND[2]
+        with tempfile.TemporaryDirectory() as bin_dir:
+            # A PATH with sh but no su, and an sh that reports how it was run.
+            sh = os.path.join(bin_dir, "sh")
+            with open(sh, "w") as f:
+                f.write('#!/bin/sh\necho "sh $*"\n')
+            os.chmod(sh, 0o755)
+            result = subprocess.run(
+                ["/bin/sh", "-c", script],
+                env={"PATH": bin_dir},
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        self.assertEqual(result.stdout, "sh -l\n")
+
+    def test_shell_command_uses_su_when_present(self):
+        script = ind.TERMINAL_COMMAND[2]
+        with tempfile.TemporaryDirectory() as bin_dir:
+            for name in ("su", "sh"):
+                path = os.path.join(bin_dir, name)
+                with open(path, "w") as f:
+                    f.write(f'#!/bin/sh\necho "{name} $*"\n')
+                os.chmod(path, 0o755)
+            result = subprocess.run(
+                ["/bin/sh", "-c", script],
+                env={"PATH": bin_dir},
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        self.assertEqual(result.stdout, "su -l\n")
 
     def test_start_connects_control_then_data_websockets(self):
         session = self.make_session()
