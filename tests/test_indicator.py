@@ -337,6 +337,34 @@ class ActionTest(IndicatorTestCase):
         self.assertFalse(self.app._refresh_event.is_set())
 
 
+class IconTest(IndicatorTestCase):
+    def setUp(self):
+        super().setUp()
+        self.app = self.make_app(FakeServers({LOCAL: []}))
+        self.indicator = self.app.indicator
+        self.indicator.reset_mock()
+        self.app._current_icon = None
+
+    def test_icon_files_exist(self):
+        self.assertTrue(os.path.isfile(ind.ICON_NORMAL_FILE))
+        self.assertTrue(os.path.isfile(ind.ICON_ALERT))
+
+    def test_symbolic_icon_by_name_from_theme_path(self):
+        app = self.make_app(FakeServers({LOCAL: []}))
+        app.indicator.set_icon_theme_path.assert_called_with(ind.ICON_THEME_DIR)
+        app._current_icon = None
+        app._update_icon()
+        app.indicator.set_icon_full.assert_called_with(ind.ICON_NORMAL, "LXD")
+
+    def test_alert_icon_when_lxd_unavailable(self):
+        self.app.lxd_client = None
+        self.app.lxd_error_message = "no socket"
+        self.app._update_icon()
+        self.indicator.set_icon_full.assert_called_once_with(
+            ind.ICON_ALERT, "LXD unavailable"
+        )
+
+
 class HelpersTest(unittest.TestCase):
     def test_instance_label(self):
         self.assertEqual(ind._instance_label(None, "web"), "web")
