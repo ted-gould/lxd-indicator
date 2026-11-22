@@ -232,14 +232,16 @@ def _sort_key(info):
 def _instance_changes(previous, current):
     """Returns [(name, [change, ...])] between two {name: status} snapshots.
 
-    Changes are "created", "started" and "stopped". Thawing a frozen instance
-    isn't reported as a start, and deletions aren't reported.
+    Changes are "created", "started", "stopped" and "deleted". Thawing a
+    frozen instance isn't reported as a start.
     """
     changes = []
-    for name, status in sorted(current.items()):
-        old = previous.get(name)
+    for name in sorted(set(previous) | set(current)):
+        old, status = previous.get(name), current.get(name)
         found = []
-        if old is None:
+        if status is None:
+            found.append("deleted")
+        elif old is None:
             found.append("created")
         if status == "running" and old not in ("running", "frozen"):
             found.append("started")
@@ -250,23 +252,32 @@ def _instance_changes(previous, current):
     return changes
 
 
-_CHANGE_TITLES = {"started": "Started", "stopped": "Stopped"}
+_CHANGE_TITLES = {
+    "created": "Created",
+    "started": "Started",
+    "stopped": "Stopped",
+    "deleted": "Deleted",
+}
 _ACTION_TITLES = {"start": "Start", "stop": "Stop"}
 
 
 def _notification_text(label, changes):
-    """Returns (summary, body) describing an instance's recent changes."""
-    if changes[0] == "created":
-        rest = changes[1:]
+    """Returns (summary, body) describing an instance's recent changes.
+
+    The summary says where the instance ended up ("New Machine" while it
+    exists after being created); the body lists the changes when there were
+    several.
+    """
+    last = changes[-1]
+    if last != "deleted" and "created" in changes:
         summary = f"New Machine: {label}"
-        if not rest:
-            return summary, ""
-        words = ["Created"] + rest
-        return summary, ", ".join(words[:-1]) + " and " + words[-1]
-    summary = f"{_CHANGE_TITLES[changes[-1]]}: {label}"
+    else:
+        summary = f"{_CHANGE_TITLES[last]}: {label}"
     if len(changes) == 1:
         return summary, ""
     words = [_CHANGE_TITLES[changes[0]]] + changes[1:]
+    if changes[0] == "created":
+        return summary, ", ".join(words[:-1]) + " and " + words[-1]
     return summary, ", then ".join(words)
 
 

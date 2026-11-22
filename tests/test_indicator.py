@@ -407,6 +407,31 @@ class ChangeTrackingTest(IndicatorTestCase):
             ],
         )
 
+    def test_deleted_instances_are_notified(self):
+        self.settle()
+        local = self.servers.instances[LOCAL]
+        local[:] = [i for i in local if i.name != "web"]
+        self.servers.instances["https://zeta:8443"].clear()
+        self.app._refresh_once()
+        self.assertCountEqual(
+            self.notified(), [(None, "web", ["deleted"]), ("zeta", "api", ["deleted"])]
+        )
+
+    def test_unreachable_remote_is_not_reported_as_deleted(self):
+        self.settle()
+        self.servers.unreachable.add("https://zeta:8443")
+        self.app._refresh_once()
+        self.assertEqual(self.notified(), [])
+
+    def test_removed_remote_is_not_reported_as_deleted(self):
+        self.settle()
+        self.write_config("""\
+            remotes:
+              alpha: {addr: "https://alpha:8443", protocol: lxd}
+            """)
+        self.app._refresh_once()
+        self.assertEqual(self.notified(), [])
+
     def test_unchanged_listing_is_silent(self):
         self.settle()
         self.app._refresh_once()
@@ -504,6 +529,14 @@ class NotifierTest(unittest.TestCase):
         self.notifier.instance_changes(None, "foo", ["stopped"])
         self.assertEqual(self.notifier.calls[-1], (0, "Stopped: foo", ""))
 
+    def test_quick_delete_updates_the_same_notification(self):
+        self.notifier.instance_changes(None, "foo", ["stopped"])
+        self.notifier.reply(7)
+        self.notifier.instance_changes(None, "foo", ["deleted"])
+        self.assertEqual(
+            self.notifier.calls[-1], (7, "Deleted: foo", "Stopped, then deleted")
+        )
+
     def test_instances_get_separate_notifications(self):
         self.notifier.instance_changes(None, "foo", ["started"])
         self.notifier.reply(7)
@@ -555,6 +588,7 @@ class HelpersTest(unittest.TestCase):
             [
                 ("a", ["stopped"]),
                 ("b", ["started"]),
+                ("gone", ["deleted"]),
                 ("new", ["created"]),
                 ("newrun", ["created", "started"]),
             ],
@@ -571,6 +605,19 @@ class HelpersTest(unittest.TestCase):
         self.assertEqual(
             text("foo", ["started", "stopped"]),
             ("Stopped: foo", "Started, then stopped"),
+        )
+        self.assertEqual(text("foo", ["deleted"]), ("Deleted: foo", ""))
+        self.assertEqual(
+            text("foo", ["stopped", "deleted"]),
+            ("Deleted: foo", "Stopped, then deleted"),
+        )
+        self.assertEqual(
+            text("foo", ["created", "started", "deleted"]),
+            ("Deleted: foo", "Created, started and deleted"),
+        )
+        self.assertEqual(
+            text("foo", ["deleted", "created"]),
+            ("New Machine: foo", "Deleted, then created"),
         )
 
     def test_instance_label(self):
