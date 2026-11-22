@@ -203,6 +203,11 @@ def _can_open_terminal(status):
     return Vte is not None and status == "running"
 
 
+def _needs_start_for_terminal(status):
+    """Whether the terminal item should start the instance first."""
+    return Vte is not None and status == "stopped"
+
+
 def _sort_key(info):
     # Local instances first, then each remote in alphabetical order.
     return (info["remote"] is not None, info["remote"] or "", info["name"])
@@ -699,6 +704,7 @@ class LXDIndicatorApp:
         return self.remote_clients.get(remote, (None, None))[1]
 
     def _run_action(self, remote, instance_name, action):
+        """Runs action on the instance; returns whether it succeeded."""
         label = _instance_label(remote, instance_name)
         with self._lock:
             try:
@@ -716,9 +722,15 @@ class LXDIndicatorApp:
                 # Refresh right away so the new state shows up. On failure, leave
                 # the error visible until the next periodic refresh instead.
                 self._refresh_event.set()
-                return
+                return True
             print(f"Error: {self.lxd_error_message}")
             GLib.idle_add(self._build_or_update_menu)
+            return False
+
+    def _start_then_open_terminal(self, remote, instance_name):
+        """Starts the instance, waits for it, then opens a terminal on it."""
+        if self._run_action(remote, instance_name, "start"):
+            GLib.idle_add(self._open_terminal_idle, remote, instance_name)
 
     # ---- UI (GTK main thread) -------------------------------------------
 
@@ -788,12 +800,19 @@ class LXDIndicatorApp:
             submenu.append(start)
             submenu.append(stop)
             submenu.append(Gtk.SeparatorMenuItem())
-            terminal = Gtk.MenuItem(label="Terminal")
-            terminal.connect(
-                "activate",
-                functools.partial(self._on_open_terminal, remote, name),
-            )
-            terminal.set_sensitive(_can_open_terminal(status))
+            if _needs_start_for_terminal(status):
+                terminal = Gtk.MenuItem(label="Start & Terminal")
+                terminal.connect(
+                    "activate",
+                    functools.partial(self._on_start_and_open_terminal, remote, name),
+                )
+            else:
+                terminal = Gtk.MenuItem(label="Terminal")
+                terminal.connect(
+                    "activate",
+                    functools.partial(self._on_open_terminal, remote, name),
+                )
+                terminal.set_sensitive(_can_open_terminal(status))
             if Vte is None:
                 terminal.set_tooltip_text(
                     "Needs the VTE terminal widget (gir1.2-vte-2.91)"
@@ -826,6 +845,18 @@ class LXDIndicatorApp:
         threading.Thread(
             target=self._run_action, args=(remote, instance_name, action), daemon=True
         ).start()
+
+    def _on_start_and_open_terminal(self, remote, instance_name, _widget):
+        print(f"Starting {_instance_label(remote, instance_name)} for a terminal")
+        threading.Thread(
+            target=self._start_then_open_terminal,
+            args=(remote, instance_name),
+            daemon=True,
+        ).start()
+
+    def _open_terminal_idle(self, remote, instance_name):
+        self._on_open_terminal(remote, instance_name, None)
+        return False  # one-shot
 
     def _on_open_terminal(self, remote, instance_name, _widget):
         label = _instance_label(remote, instance_name)
