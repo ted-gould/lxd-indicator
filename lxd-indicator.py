@@ -11,6 +11,7 @@ import signal
 import ssl
 import subprocess
 import threading
+import time
 from urllib.parse import quote, urlparse
 
 import gi
@@ -23,7 +24,7 @@ try:
 except (ValueError, ImportError):
     gi.require_version("AppIndicator3", "0.1")
     from gi.repository import AppIndicator3
-from gi.repository import GLib, Gtk
+from gi.repository import Gio, GLib, Gtk
 
 try:
     # The terminal widget behind GNOME Terminal; optional, for "Terminal".
@@ -35,14 +36,32 @@ except (ValueError, ImportError):
 import requests.certs
 import yaml
 from pylxd import Client
+from pylxd.client import EventType
 from pylxd.exceptions import ClientConnectionFailed, LXDAPIException, NotFound
-from ws4py.exc import HandshakeError
+from ws4py.client import WebSocketBaseClient
 from ws4py.client.threadedclient import WebSocketClient
+from ws4py.exc import HandshakeError
 
 APPINDICATOR_ID = "lxd-status-indicator"
 APP_NAME = "lxd-indicator"
 REFRESH_INTERVAL = 10  # seconds
 REMOTE_TIMEOUT = 5  # seconds; keeps an unreachable remote from stalling refreshes
+EVENT_RETRY_INTERVAL = 5  # seconds between attempts to reopen the LXD event stream
+# Changes seen this soon after launch only set the baseline: no notifications
+# for everything that "appears" or settles while the indicator starts up.
+STARTUP_QUIET_PERIOD = 15  # seconds
+# Changes to the same instance this close together update one notification
+# (e.g. "New Machine: foo" becomes "Created and started") instead of stacking.
+NOTIFICATION_MERGE_WINDOW = 30  # seconds
+
+# Freedesktop notification service (allowed by the snap's `desktop` plug).
+NOTIFY_BUS_NAME = "org.freedesktop.Notifications"
+NOTIFY_OBJECT_PATH = "/org/freedesktop/Notifications"
+NOTIFY_IFACE = "org.freedesktop.Notifications"
+# snapd installs the launcher as <snap>_<app>.desktop.
+DESKTOP_ENTRY = (
+    f"{os.environ['SNAP_NAME']}_{APP_NAME}" if os.environ.get("SNAP_NAME") else APP_NAME
+)
 
 SNAP_DIR = os.environ.get("SNAP")
 # In the snap the icons sit at $SNAP; in a source checkout, next to this file.
@@ -211,6 +230,219 @@ def _needs_start_for_terminal(status):
 def _sort_key(info):
     # Local instances first, then each remote in alphabetical order.
     return (info["remote"] is not None, info["remote"] or "", info["name"])
+
+
+def _instance_changes(previous, current):
+    """Returns [(name, [change, ...])] between two {name: status} snapshots.
+
+    Changes are "created", "started", "stopped", "frozen", "thawed" and
+    "deleted". Thawing a frozen instance is "thawed", not "started".
+    """
+    changes = []
+    for name in sorted(set(previous) | set(current)):
+        old, status = previous.get(name), current.get(name)
+        found = []
+        if status is None:
+            found.append("deleted")
+        elif old is None:
+            found.append("created")
+        if status == "running" and old == "frozen":
+            found.append("thawed")
+        elif status == "running" and old != "running":
+            found.append("started")
+        elif status == "stopped" and old not in (None, "stopped"):
+            found.append("stopped")
+        elif status == "frozen" and old not in (None, "frozen"):
+            found.append("frozen")
+        if found:
+            changes.append((name, found))
+    return changes
+
+
+_CHANGE_TITLES = {
+    "created": "Created",
+    "started": "Started",
+    "stopped": "Stopped",
+    "frozen": "Frozen",
+    "thawed": "Thawed",
+    "deleted": "Deleted",
+}
+# Instance actions in the menu: (pylxd method, menu label, statuses it's for).
+INSTANCE_ACTIONS = [
+    ("start", "Start", lambda status: status not in ("running", "frozen")),
+    ("stop", "Stop", lambda status: status in ("running", "frozen")),
+    ("freeze", "Freeze", lambda status: status == "running"),
+    ("unfreeze", "Thaw", lambda status: status == "frozen"),
+]
+_ACTION_TITLES = {action: label for action, label, _ in INSTANCE_ACTIONS}
+
+
+def _notification_text(label, changes):
+    """Returns (summary, body) describing an instance's recent changes.
+
+    The summary says where the instance ended up ("New Machine" while it
+    exists after being created); the body lists the changes when there were
+    several.
+    """
+    last = changes[-1]
+    if last != "deleted" and "created" in changes:
+        summary = f"New Machine: {label}"
+    else:
+        summary = f"{_CHANGE_TITLES[last]}: {label}"
+    if len(changes) == 1:
+        return summary, ""
+    words = [_CHANGE_TITLES[changes[0]]] + changes[1:]
+    if changes[0] == "created":
+        return summary, ", ".join(words[:-1]) + " and " + words[-1]
+    return summary, ", then ".join(words)
+
+
+class Notifier:
+    """Desktop notifications that are updated in place while events keep coming.
+
+    Each instance (and each failed action) keeps the ID the notification server
+    gave its notification, so later changes replace that notification rather
+    than adding another. Runs on the GTK main thread.
+    """
+
+    def __init__(self):
+        self._proxy = None
+        # key -> {"id", "changes", "time", "summary", "body", "busy", "dirty"}
+        self._entries = {}
+        try:
+            self._proxy = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SESSION,
+                Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES,
+                None,
+                NOTIFY_BUS_NAME,
+                NOTIFY_OBJECT_PATH,
+                NOTIFY_IFACE,
+                None,
+            )
+            self._proxy.connect("g-signal", self._on_signal)
+        except GLib.Error as e:
+            self._proxy = None
+            print(f"Notification service unavailable: {e.message}")
+
+    def instance_changes(self, remote, name, changes):
+        key = ("instance", remote, name)
+        entry = self._entry(key)
+        for change in changes:
+            if not entry["changes"] or entry["changes"][-1] != change:
+                entry["changes"].append(change)
+        summary, body = _notification_text(
+            _instance_label(remote, name), entry["changes"]
+        )
+        self._show(key, summary, body)
+        return False  # one-shot when used with GLib.idle_add
+
+    def action_failed(self, remote, name, action, error):
+        key = ("failure", remote, name, action)
+        self._entry(key)
+        summary = f"Failed to {_ACTION_TITLES.get(action, action.title())}"
+        self._show(key, summary, f"{_instance_label(remote, name)}: {error}")
+        return False
+
+    def _entry(self, key):
+        """Returns the key's entry, starting afresh once its last update is old."""
+        now = time.monotonic()
+        for old_key, old in list(self._entries.items()):
+            if now - old["time"] > NOTIFICATION_MERGE_WINDOW and not old["busy"]:
+                del self._entries[old_key]
+        entry = self._entries.setdefault(
+            key, {"id": 0, "changes": [], "busy": False, "dirty": False}
+        )
+        entry["time"] = now
+        return entry
+
+    def _show(self, key, summary, body):
+        entry = self._entries[key]
+        entry["summary"], entry["body"] = summary, body
+        print(f"Notification: {summary}" + (f" ({body})" if body else ""))
+        if entry["busy"]:
+            # The server hasn't told us the ID yet; resend once it has.
+            entry["dirty"] = True
+            return
+        entry["busy"] = True
+        args = (
+            APP_NAME,
+            entry["id"],
+            ICON_ALERT,
+            summary,
+            body,
+            [],
+            {"desktop-entry": DESKTOP_ENTRY},
+            -1,
+        )
+        self._dbus_notify(args, functools.partial(self._on_notified, key, entry))
+
+    def _on_notified(self, key, entry, notification_id):
+        entry["busy"] = False
+        if notification_id:
+            entry["id"] = notification_id
+        if entry["dirty"] and self._entries.get(key) is entry:
+            entry["dirty"] = False
+            self._show(key, entry["summary"], entry["body"])
+
+    def _dbus_notify(self, args, done):
+        """Calls Notify; done(id) runs with the new ID, or 0 if it failed."""
+        if self._proxy is None:
+            done(0)
+            return
+
+        def finish(proxy, result):
+            try:
+                done(proxy.call_finish(result).unpack()[0])
+            except GLib.Error as e:
+                print(f"Failed to show notification: {e.message}")
+                done(0)
+
+        self._proxy.call(
+            "Notify",
+            GLib.Variant(
+                "(susssasa{sv}i)",
+                args[:6]
+                + ({k: GLib.Variant("s", v) for k, v in args[6].items()},)
+                + args[7:],
+            ),
+            Gio.DBusCallFlags.NONE,
+            -1,
+            None,
+            finish,
+        )
+
+    def _on_signal(self, _proxy, _sender, signal_name, parameters):
+        if signal_name != "NotificationClosed":
+            return
+        closed_id = parameters.unpack()[0]
+        # Once dismissed, the next change gets a fresh notification.
+        for key, entry in list(self._entries.items()):
+            if entry["id"] == closed_id and not entry["busy"]:
+                del self._entries[key]
+
+
+class _LifecycleEventClient(WebSocketBaseClient):
+    """Websocket client for LXD's /1.0/events that hands each event to a callback."""
+
+    on_event = None
+
+    def __init__(self, url, **kwargs):
+        # LXD rejects ws4py's made-up Origin header on unix sockets.
+        kwargs["exclude_headers"] = list(kwargs.get("exclude_headers") or []) + [
+            "Origin"
+        ]
+        super().__init__(url, **kwargs)
+
+    def handshake_ok(self):
+        pass
+
+    def received_message(self, message):
+        try:
+            event = json.loads(message.data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return
+        if self.on_event:
+            self.on_event(event)
 
 
 def _pinned_fingerprint(path):
@@ -531,6 +763,10 @@ class LXDIndicatorApp:
         self.lxd_instances_cache = []
         self._lock = threading.Lock()
         self._refresh_event = threading.Event()
+        # Source (None for local, else remote name) -> {instance name: status}
+        # from its last successful listing, to spot changes for notifications.
+        self._known_instances = {}
+        self._quiet_until = time.monotonic() + STARTUP_QUIET_PERIOD
         self._terminal_windows = set()  # open TerminalWindows, kept alive
 
         self._current_icon = None
@@ -549,9 +785,12 @@ class LXDIndicatorApp:
         self.menu = Gtk.Menu()
         self.indicator.set_menu(self.menu)
         self._build_or_update_menu()
+        self.notifier = Notifier()
 
         self.refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True)
         self.refresh_thread.start()
+        self.events_thread = threading.Thread(target=self._event_loop, daemon=True)
+        self.events_thread.start()
 
     # ---- LXD access (worker thread) -------------------------------------
 
@@ -636,7 +875,7 @@ class LXDIndicatorApp:
         return [], error
 
     def _fetch_all_remote_instances(self):
-        """Returns (instances, {remote: error}) across all configured remotes."""
+        """Returns (instances, {remote: error}, configured remote names)."""
         try:
             config_dir, remotes = _load_remotes()
         except (OSError, yaml.YAMLError) as e:
@@ -648,13 +887,14 @@ class LXDIndicatorApp:
             else:
                 message = f"Can't read the lxc config: {e}"
             print(f"Error: {message}")
-            return [], {"remotes": message}
+            # The remotes are unknown, not removed: keep what's known of them.
+            return [], {"remotes": message}, None
 
         # Forget clients for remotes that were removed from the config.
         for name in set(self.remote_clients) - set(remotes):
             del self.remote_clients[name]
         if not remotes:
-            return [], {}
+            return [], {}, set()
 
         instances, errors = [], {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(remotes)) as pool:
@@ -669,7 +909,7 @@ class LXDIndicatorApp:
                 instances.extend(remote_instances)
                 if error:
                     errors[name] = error
-        return instances, errors
+        return instances, errors, set(remotes)
 
     def _refresh_once(self):
         with self._lock:
@@ -679,7 +919,10 @@ class LXDIndicatorApp:
                 self.remote_errors,
             )
             local_instances = self._fetch_instances()
-            remote_instances, self.remote_errors = self._fetch_all_remote_instances()
+            local_ok = self.lxd_error_message is None
+            remote_instances, self.remote_errors, remote_names = (
+                self._fetch_all_remote_instances()
+            )
             self.lxd_instances_cache = sorted(
                 local_instances + remote_instances, key=_sort_key
             )
@@ -691,11 +934,76 @@ class LXDIndicatorApp:
             if current != previous:
                 GLib.idle_add(self._build_or_update_menu)
 
+            listed = set(remote_names or ()) - set(self.remote_errors)
+            if local_ok:
+                listed.add(None)
+            self._track_changes(listed, remote_names)
+
+    def _track_changes(self, listed, remote_names):
+        """Notifies about instance changes in the sources listed this refresh.
+
+        A source's first successful listing only records a baseline, as does
+        everything during the startup quiet period. Sources that failed keep
+        their old baseline, so changes made while unreachable are still
+        reported once they're back.
+        """
+        if remote_names is not None:
+            for source in list(self._known_instances):
+                if source is not None and source not in remote_names:
+                    del self._known_instances[source]
+        quiet = time.monotonic() < self._quiet_until
+        for source in listed:
+            snapshot = {
+                info["name"]: info["status"]
+                for info in self.lxd_instances_cache
+                if info["remote"] == source
+            }
+            previous = self._known_instances.get(source)
+            self._known_instances[source] = snapshot
+            if previous is None or quiet:
+                continue
+            for name, changes in _instance_changes(previous, snapshot):
+                GLib.idle_add(self.notifier.instance_changes, source, name, changes)
+
     def _refresh_loop(self):
         while True:
+            # Clear first, so a request made during the refresh isn't lost.
+            self._refresh_event.clear()
             self._refresh_once()
             self._refresh_event.wait(REFRESH_INTERVAL)
-            self._refresh_event.clear()
+
+    def _on_lxd_event(self, event):
+        action = (event.get("metadata") or {}).get("action") or ""
+        if action.startswith("instance-"):
+            print(f"LXD event: {action}")
+            self._refresh_event.set()
+
+    def _watch_events_once(self):
+        """Follows the local daemon's lifecycle events until the stream drops."""
+        client = self.lxd_client
+        if client is None:
+            return
+        ws = client.events(
+            websocket_client=_LifecycleEventClient,
+            event_types={EventType.Lifecycle},
+        )
+        ws.on_event = self._on_lxd_event
+        ws.connect()
+        print("Watching LXD events.")
+        # Catch anything that changed while the stream was down.
+        self._refresh_event.set()
+        ws.run()  # closes the socket when it returns
+
+    def _event_loop(self):
+        # Instances started, stopped or created by `lxc` or anything else show
+        # up as lifecycle events; each one triggers an immediate refresh, and
+        # the refresh works out what to notify about.
+        while True:
+            try:
+                self._watch_events_once()
+            except Exception as e:
+                print(f"LXD event stream unavailable: {e}")
+            time.sleep(EVENT_RETRY_INTERVAL)
 
     def _client_for(self, remote):
         """The connected client for remote (None for local), or None."""
@@ -715,15 +1023,25 @@ class LXDIndicatorApp:
                 getattr(instance, action)(wait=True, timeout=30)
                 print(f"{action} completed on {label}.")
             except NotFound:
+                error = "Instance not found."
                 self.lxd_error_message = f"Instance {label} not found."
             except Exception as e:
-                self.lxd_error_message = f"Failed to {action} {label}: {e}"
+                error = str(e) or type(e).__name__
+                verb = _ACTION_TITLES.get(action, action).lower()
+                self.lxd_error_message = f"Failed to {verb} {label}: {e}"
             else:
                 # Refresh right away so the new state shows up. On failure, leave
                 # the error visible until the next periodic refresh instead.
                 self._refresh_event.set()
                 return True
             print(f"Error: {self.lxd_error_message}")
+            GLib.idle_add(
+                self.notifier.action_failed,
+                remote,
+                instance_name,
+                action,
+                error,
+            )
             GLib.idle_add(self._build_or_update_menu)
             return False
 
@@ -785,20 +1103,14 @@ class LXDIndicatorApp:
             item.add(box)
 
             submenu = Gtk.Menu()
-            start = Gtk.MenuItem(label="Start")
-            start.connect(
-                "activate",
-                functools.partial(self._on_instance_action, remote, name, "start"),
-            )
-            start.set_sensitive(status not in ("running", "frozen"))
-            stop = Gtk.MenuItem(label="Stop")
-            stop.connect(
-                "activate",
-                functools.partial(self._on_instance_action, remote, name, "stop"),
-            )
-            stop.set_sensitive(status in ("running", "frozen"))
-            submenu.append(start)
-            submenu.append(stop)
+            for action, action_label, applies in INSTANCE_ACTIONS:
+                action_item = Gtk.MenuItem(label=action_label)
+                action_item.connect(
+                    "activate",
+                    functools.partial(self._on_instance_action, remote, name, action),
+                )
+                action_item.set_sensitive(applies(status))
+                submenu.append(action_item)
             submenu.append(Gtk.SeparatorMenuItem())
             if _needs_start_for_terminal(status):
                 terminal = Gtk.MenuItem(label="Start & Terminal")
