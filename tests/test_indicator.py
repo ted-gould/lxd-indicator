@@ -23,7 +23,7 @@ def _load_module():
     gi = types.ModuleType('gi')
     gi.require_version = lambda *args: None
     repository = types.ModuleType('gi.repository')
-    for name in ('AyatanaAppIndicator3', 'GLib', 'Gtk'):
+    for name in ('AyatanaAppIndicator3', 'Gio', 'GLib', 'Gtk'):
         setattr(repository, name, mock.MagicMock(name=name))
     with mock.patch.dict(sys.modules, {'gi': gi, 'gi.repository': repository}):
         spec = importlib.util.spec_from_file_location('lxd_indicator', SCRIPT)
