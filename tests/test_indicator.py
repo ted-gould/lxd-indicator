@@ -432,6 +432,17 @@ class ChangeTrackingTest(IndicatorTestCase):
         self.app._refresh_once()
         self.assertEqual(self.notified(), [])
 
+    def test_freeze_and_thaw_are_notified(self):
+        self.settle()
+        web = self.servers.instances[LOCAL][0]
+        web.status = "Frozen"
+        self.app._refresh_once()
+        web.status = "Running"
+        self.app._refresh_once()
+        self.assertEqual(
+            self.notified(), [(None, "web", ["frozen"]), (None, "web", ["thawed"])]
+        )
+
     def test_unchanged_listing_is_silent(self):
         self.settle()
         self.app._refresh_once()
@@ -603,11 +614,20 @@ class IconTest(IndicatorTestCase):
 
 class HelpersTest(unittest.TestCase):
     def test_instance_changes(self):
-        previous = {"a": "running", "b": "stopped", "c": "frozen", "gone": "running"}
+        previous = {
+            "a": "running",
+            "b": "stopped",
+            "c": "frozen",
+            "d": "running",
+            "e": "frozen",
+            "gone": "running",
+        }
         current = {
             "a": "stopped",
             "b": "running",
             "c": "running",
+            "d": "frozen",
+            "e": "stopped",
             "new": "stopped",
             "newrun": "running",
         }
@@ -616,6 +636,9 @@ class HelpersTest(unittest.TestCase):
             [
                 ("a", ["stopped"]),
                 ("b", ["started"]),
+                ("c", ["thawed"]),
+                ("d", ["frozen"]),
+                ("e", ["stopped"]),
                 ("gone", ["deleted"]),
                 ("new", ["created"]),
                 ("newrun", ["created", "started"]),
@@ -635,6 +658,10 @@ class HelpersTest(unittest.TestCase):
             ("Stopped: foo", "Started, then stopped"),
         )
         self.assertEqual(text("foo", ["deleted"]), ("Deleted: foo", ""))
+        self.assertEqual(text("foo", ["frozen"]), ("Frozen: foo", ""))
+        self.assertEqual(
+            text("foo", ["frozen", "thawed"]), ("Thawed: foo", "Frozen, then thawed")
+        )
         self.assertEqual(
             text("foo", ["stopped", "deleted"]),
             ("Deleted: foo", "Stopped, then deleted"),

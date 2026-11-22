@@ -230,8 +230,8 @@ def _sort_key(info):
 def _instance_changes(previous, current):
     """Returns [(name, [change, ...])] between two {name: status} snapshots.
 
-    Changes are "created", "started", "stopped" and "deleted". Thawing a
-    frozen instance isn't reported as a start.
+    Changes are "created", "started", "stopped", "frozen", "thawed" and
+    "deleted". Thawing a frozen instance is "thawed", not "started".
     """
     changes = []
     for name in sorted(set(previous) | set(current)):
@@ -241,10 +241,14 @@ def _instance_changes(previous, current):
             found.append("deleted")
         elif old is None:
             found.append("created")
-        if status == "running" and old not in ("running", "frozen"):
+        if status == "running" and old == "frozen":
+            found.append("thawed")
+        elif status == "running" and old != "running":
             found.append("started")
         elif status == "stopped" and old not in (None, "stopped"):
             found.append("stopped")
+        elif status == "frozen" and old not in (None, "frozen"):
+            found.append("frozen")
         if found:
             changes.append((name, found))
     return changes
@@ -254,6 +258,8 @@ _CHANGE_TITLES = {
     "created": "Created",
     "started": "Started",
     "stopped": "Stopped",
+    "frozen": "Frozen",
+    "thawed": "Thawed",
     "deleted": "Deleted",
 }
 _ACTION_TITLES = {"start": "Start", "stop": "Stop"}
