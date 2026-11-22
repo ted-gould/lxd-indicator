@@ -19,6 +19,9 @@ description: |
 
   Your user must also be a member of the `lxd` group.
 
+  Each running instance's menu has a Terminal item, which opens a shell in
+  the instance (like `lxc shell <instance>`) in a terminal window.
+
   Instances on the remotes configured with `lxc remote add` are listed too,
   as `remote:name`. To let the indicator read the lxc configuration (the
   remote list and client certificate), run:
@@ -82,6 +85,9 @@ parts:
       - python3-yaml
       - gir1.2-ayatanaappindicator3-0.1
       - libayatana-appindicator3-1
+      # The terminal widget for the per-instance "Terminal" window.
+      - gir1.2-vte-2.91
+      - libvte-2.91-0
     override-build: |
       # The gnome extension points PYTHONPATH/LD_LIBRARY_PATH at the SDK; keep
       # them out of the host interpreter running pip.
