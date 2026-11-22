@@ -63,6 +63,7 @@ jobs:
         sudo snap connect lxd-indicator:gnome-46-2404 gnome-46-2404 || true
         sudo snap connect lxd-indicator:gpu-2404 mesa-2404 || true
         snap connections lxd-indicator
+        ls -l /snap/lxd-indicator/current/bin/python3* /snap/lxd-indicator/current/usr/bin/python3* || true
 
     - name: Test the snap
       run: |

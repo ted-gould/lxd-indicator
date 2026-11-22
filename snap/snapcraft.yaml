@@ -17,7 +17,10 @@ confinement: strict
 
 apps:
   lxd-indicator:
-    command: bin/lxd-indicator.py
+    # Run through the venv interpreter explicitly: `env python3` would pick
+    # up the staged $SNAP/usr/bin/python3 (no pylxd) or the GNOME runtime's
+    # python3 (no _ssl), depending on PATH order.
+    command: bin/python3 $SNAP/bin/lxd-indicator.py
     # The gnome extension provides the desktop launcher (GTK, GdkPixbuf
     # loaders, GSettings schemas, themes) and the desktop/x11/wayland/opengl/
     # gsettings plugs.
@@ -38,6 +41,8 @@ parts:
     python-packages:
       - pylxd>=2.4.2,<3
     stage-packages:
+      # core24 ships no Python, so bundle the interpreter the venv links to.
+      - python3-venv
       - python3-gi
       - gir1.2-ayatanaappindicator3-0.1
       - libayatana-appindicator3-1
