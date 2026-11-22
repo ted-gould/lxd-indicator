@@ -17,10 +17,10 @@ confinement: strict
 
 apps:
   lxd-indicator:
-    # Run through the venv interpreter explicitly: `env python3` would pick
-    # up the staged $SNAP/usr/bin/python3 (no pylxd) or the GNOME runtime's
-    # python3 (no _ssl), depending on PATH order.
-    command: bin/python3 $SNAP/bin/lxd-indicator.py
+    # Run the bundled Ubuntu Python explicitly. Its stdlib is found relative
+    # to the binary ($SNAP/usr/lib/python3.12), so the GNOME runtime's
+    # partial Python (no _ssl) is never picked up.
+    command: usr/bin/python3 $SNAP/bin/lxd-indicator.py
     # The gnome extension provides the desktop launcher (GTK, GdkPixbuf
     # loaders, GSettings schemas, themes) and the desktop/x11/wayland/opengl/
     # gsettings plugs.
@@ -30,23 +30,30 @@ apps:
       - unity7  # StatusNotifierItem D-Bus API used by the tray icon
     autostart: lxd-indicator.desktop
     environment:
-      PYTHONPATH: $SNAP/usr/lib/python3/dist-packages
+      PYTHONPATH: $SNAP/lib/python3/site-packages:$SNAP/usr/lib/python3/dist-packages
       # Log lines go straight to the journal/terminal instead of a buffer.
       PYTHONUNBUFFERED: '1'
 
 parts:
   lxd-indicator:
-    plugin: python
+    # Not the python plugin: with the gnome extension the SDK's python3 is
+    # first on the build PATH, so the plugin's venv ends up bound to the
+    # GNOME runtime's Python at run time. Install pylxd with the system
+    # Python (same 3.12 ABI as the staged interpreter) instead.
+    plugin: nil
     source: .
-    python-packages:
-      - pylxd>=2.4.2,<3
+    build-packages:
+      - python3-pip
     stage-packages:
-      # core24 ships no Python, so bundle the interpreter the venv links to.
-      - python3-venv
+      - python3
       - python3-gi
       - gir1.2-ayatanaappindicator3-0.1
       - libayatana-appindicator3-1
     override-build: |
-      craftctl default
-      install -D -m 755 $CRAFT_PART_SRC/lxd-indicator.py $CRAFT_PART_INSTALL/bin/lxd-indicator.py
-      install -D -m 644 $CRAFT_PART_SRC/lxd_logo.png $CRAFT_PART_INSTALL/lxd_logo.png
+      # The gnome extension points PYTHONPATH/LD_LIBRARY_PATH at the SDK; keep
+      # them out of the host interpreter running pip.
+      env -u PYTHONPATH -u LD_LIBRARY_PATH /usr/bin/python3 -m pip install --no-cache-dir --break-system-packages \
+        --target "$CRAFT_PART_INSTALL/lib/python3/site-packages" \
+        'pylxd>=2.4.2,<3'
+      install -D -m 755 lxd-indicator.py "$CRAFT_PART_INSTALL/bin/lxd-indicator.py"
+      install -D -m 644 lxd_logo.png "$CRAFT_PART_INSTALL/lxd_logo.png"
