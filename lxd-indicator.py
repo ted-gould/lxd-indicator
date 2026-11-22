@@ -24,7 +24,7 @@ try:
 except (ValueError, ImportError):
     gi.require_version("AppIndicator3", "0.1")
     from gi.repository import AppIndicator3
-from gi.repository import GLib, Gtk
+from gi.repository import Gio, GLib, Gtk
 
 try:
     # The terminal widget behind GNOME Terminal; optional, for "Terminal".
