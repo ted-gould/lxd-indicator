@@ -108,13 +108,18 @@ TERMINAL_COMMAND = [
 ]
 TERMINAL_TERM = "xterm-256color"  # what VTE emulates
 TERMINAL_SCROLLBACK = 10000  # lines
-SIGHUP = 1
+SIGHUP = int(signal.SIGHUP)
 
-# Freedesktop icon names for instance states
-ICON_RUNNING = "media-playback-start-symbolic"
-ICON_STOPPED = "media-playback-stop-symbolic"
-ICON_PAUSED = "media-playback-pause-symbolic"  # "Frozen" state
-ICON_PENDING = "view-refresh-symbolic"  # transitional / unknown states
+# Freedesktop icon names for instance states; others (transitional or
+# unknown) get ICON_PENDING.
+STATUS_ICONS = {
+    "running": "media-playback-start-symbolic",
+    "stopped": "media-playback-stop-symbolic",
+    "frozen": "media-playback-pause-symbolic",
+}
+ICON_PENDING = "view-refresh-symbolic"
+# Longest server-supplied error shown in a notification.
+MAX_ERROR_LENGTH = 300
 
 
 def _lxd_socket_path():
@@ -207,7 +212,6 @@ def _instance_dicts(remote, client):
             "remote": remote,
             "name": item.name,
             "status": item.status.lower(),
-            "type": getattr(item, "type", "container").lower(),
         }
         for item in client.instances.all()
     ]
@@ -215,16 +219,6 @@ def _instance_dicts(remote, client):
 
 def _instance_label(remote, name):
     return name if remote is None else f"{remote}:{name}"
-
-
-def _can_open_terminal(status):
-    """Whether "Terminal" works for an instance: it needs a running one."""
-    return Vte is not None and status == "running"
-
-
-def _needs_start_for_terminal(status):
-    """Whether the terminal item should start the instance first."""
-    return Vte is not None and status == "stopped"
 
 
 def _sort_key(info):
@@ -259,14 +253,6 @@ def _instance_changes(previous, current):
     return changes
 
 
-_CHANGE_TITLES = {
-    "created": "Created",
-    "started": "Started",
-    "stopped": "Stopped",
-    "frozen": "Frozen",
-    "thawed": "Thawed",
-    "deleted": "Deleted",
-}
 # Instance actions in the menu: (pylxd method, menu label, statuses it's for).
 INSTANCE_ACTIONS = [
     ("start", "Start", lambda status: status not in ("running", "frozen")),
@@ -288,10 +274,10 @@ def _notification_text(label, changes):
     if last != "deleted" and "created" in changes:
         summary = f"New Machine: {label}"
     else:
-        summary = f"{_CHANGE_TITLES[last]}: {label}"
+        summary = f"{last.capitalize()}: {label}"
     if len(changes) == 1:
         return summary, ""
-    words = [_CHANGE_TITLES[changes[0]]] + changes[1:]
+    words = [changes[0].capitalize()] + changes[1:]
     if changes[0] == "created":
         return summary, ", ".join(words[:-1]) + " and " + words[-1]
     return summary, ", then ".join(words)
@@ -307,6 +293,7 @@ class Notifier:
 
     def __init__(self):
         self._proxy = None
+        self._body_markup = False
         # key -> {"id", "changes", "time", "summary", "body", "busy", "dirty"}
         self._entries = {}
         try:
@@ -320,8 +307,13 @@ class Notifier:
                 None,
             )
             self._proxy.connect("g-signal", self._on_signal)
+            # Servers with body-markup parse the body as markup, so text from
+            # LXD servers must be escaped for them (and only for them).
+            capabilities = self._proxy.call_sync(
+                "GetCapabilities", None, Gio.DBusCallFlags.NONE, 5000, None
+            ).unpack()[0]
+            self._body_markup = "body-markup" in capabilities
         except GLib.Error as e:
-            self._proxy = None
             print(f"Notification service unavailable: {e.message}")
 
     def instance_changes(self, remote, name, changes):
@@ -334,14 +326,16 @@ class Notifier:
             _instance_label(remote, name), entry["changes"]
         )
         self._show(key, summary, body)
-        return False  # one-shot when used with GLib.idle_add
 
-    def action_failed(self, remote, name, action, error):
-        key = ("failure", remote, name, action)
+    def action_failed(self, remote, name, title, error):
+        """Reports that title ("Start", "Open Terminal", ...) failed."""
+        key = ("failure", remote, name, title)
         self._entry(key)
-        summary = f"Failed to {_ACTION_TITLES.get(action, action.title())}"
-        self._show(key, summary, f"{_instance_label(remote, name)}: {error}")
-        return False
+        if len(error) > MAX_ERROR_LENGTH:
+            error = error[: MAX_ERROR_LENGTH - 1] + "…"
+        self._show(
+            key, f"Failed to {title}", f"{_instance_label(remote, name)}: {error}"
+        )
 
     def _entry(self, key):
         """Returns the key's entry, starting afresh once its last update is old."""
@@ -364,27 +358,23 @@ class Notifier:
             entry["dirty"] = True
             return
         entry["busy"] = True
-        args = (
-            APP_NAME,
-            entry["id"],
-            ICON_ALERT,
-            summary,
-            body,
-            [],
-            {"desktop-entry": DESKTOP_ENTRY},
-            -1,
+        if self._body_markup:
+            body = GLib.markup_escape_text(body)
+        self._dbus_notify(
+            entry["id"], summary, body, functools.partial(self._on_notified, key)
         )
-        self._dbus_notify(args, functools.partial(self._on_notified, key, entry))
 
-    def _on_notified(self, key, entry, notification_id):
+    def _on_notified(self, key, notification_id):
+        # Busy entries are never dropped, so the key is still there.
+        entry = self._entries[key]
         entry["busy"] = False
         if notification_id:
             entry["id"] = notification_id
-        if entry["dirty"] and self._entries.get(key) is entry:
+        if entry["dirty"]:
             entry["dirty"] = False
             self._show(key, entry["summary"], entry["body"])
 
-    def _dbus_notify(self, args, done):
+    def _dbus_notify(self, replaces_id, summary, body, done):
         """Calls Notify; done(id) runs with the new ID, or 0 if it failed."""
         if self._proxy is None:
             done(0)
@@ -397,13 +387,12 @@ class Notifier:
                 print(f"Failed to show notification: {e.message}")
                 done(0)
 
+        hints = {"desktop-entry": GLib.Variant("s", DESKTOP_ENTRY)}
         self._proxy.call(
             "Notify",
             GLib.Variant(
                 "(susssasa{sv}i)",
-                args[:6]
-                + ({k: GLib.Variant("s", v) for k, v in args[6].items()},)
-                + args[7:],
+                (APP_NAME, replaces_id, ICON_ALERT, summary, body, [], hints, -1),
             ),
             Gio.DBusCallFlags.NONE,
             -1,
@@ -424,25 +413,18 @@ class Notifier:
 class _LifecycleEventClient(WebSocketBaseClient):
     """Websocket client for LXD's /1.0/events that hands each event to a callback."""
 
-    on_event = None
+    on_event = None  # set before connecting
 
     def __init__(self, url, **kwargs):
         # LXD rejects ws4py's made-up Origin header on unix sockets.
-        kwargs["exclude_headers"] = list(kwargs.get("exclude_headers") or []) + [
-            "Origin"
-        ]
-        super().__init__(url, **kwargs)
-
-    def handshake_ok(self):
-        pass
+        super().__init__(url, exclude_headers=["origin"], **kwargs)
 
     def received_message(self, message):
         try:
             event = json.loads(message.data.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             return
-        if self.on_event:
-            self.on_event(event)
+        self.on_event(event)
 
 
 def _pinned_fingerprint(path):
@@ -502,6 +484,14 @@ class _ExecWebsocket(WebSocketClient):
 
     def closed(self, code, reason=None):
         self._on_closed()
+
+
+def _close_quietly(ws):
+    if ws is not None:
+        try:
+            ws.close()
+        except Exception:  # already gone
+            pass
 
 
 class TerminalSession:
@@ -618,17 +608,9 @@ class TerminalSession:
             control, data = self._control, self._data
             exited = self._exited
         if control is not None and not exited:  # else there's no one to hang up
-            self._send(control, self._control_message("signal", signal=SIGHUP))
-        for ws in (data, control):
-            if ws is not None:
-                try:
-                    ws.close()
-                except Exception:  # already gone
-                    pass
-
-    @staticmethod
-    def _control_message(command, **fields):
-        return json.dumps({"command": command, **fields})
+            self._send(control, json.dumps({"command": "signal", "signal": SIGHUP}))
+        _close_quietly(data)
+        _close_quietly(control)
 
     def _send_size(self):
         with self._lock:
@@ -637,7 +619,7 @@ class TerminalSession:
                 return
             columns, rows = self._sent_size = self._size
         args = {"width": str(columns), "height": str(rows)}
-        self._send(control, self._control_message("window-resize", args=args))
+        self._send(control, json.dumps({"command": "window-resize", "args": args}))
 
     @staticmethod
     def _send(ws, payload, binary=False):
@@ -656,11 +638,7 @@ class TerminalSession:
                 return
             self._exited = True
             control = self._control
-        if control is not None:
-            try:
-                control.close()
-            except Exception:
-                pass
+        _close_quietly(control)
         self.on_exit(self._exit_code())
 
     def _exit_code(self):
@@ -761,7 +739,6 @@ class LXDIndicatorApp:
         # Remote name -> error message for remotes that failed this refresh.
         self.remote_errors = {}
         self.lxd_instances_cache = []
-        self._lock = threading.Lock()
         self._refresh_event = threading.Event()
         # Source (None for local, else remote name) -> {instance name: status}
         # from its last successful listing, to spot changes for notifications.
@@ -780,19 +757,18 @@ class LXDIndicatorApp:
         self.indicator.set_icon_theme_path(ICON_THEME_DIR)
         self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
         self.indicator.set_title("LXD Indicator")
-        self._update_icon()
 
         self.menu = Gtk.Menu()
         self.indicator.set_menu(self.menu)
         self._build_or_update_menu()
         self.notifier = Notifier()
 
-        self.refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True)
-        self.refresh_thread.start()
-        self.events_thread = threading.Thread(target=self._event_loop, daemon=True)
-        self.events_thread.start()
+        threading.Thread(target=self._refresh_loop, daemon=True).start()
+        threading.Thread(target=self._event_loop, daemon=True).start()
 
-    # ---- LXD access (worker thread) -------------------------------------
+    # ---- LXD access (worker threads) ------------------------------------
+    # The refresh thread alone writes the client, instance and error state;
+    # action threads only read the clients.
 
     def _connect_lxd(self):
         socket_path = _lxd_socket_path()
@@ -863,12 +839,10 @@ class LXDIndicatorApp:
         try:
             client = self._remote_client(config_dir, name, remote)
             return _instance_dicts(name, client), None
-        except ClientConnectionFailed as e:
-            error = f"Connection failed: {e}" if str(e) else "Connection failed"
         except LXDAPIException as e:
             error = f"LXD API error: {e}"
-        except Exception as e:  # requests errors etc.
-            error = f"Lost connection: {e}"
+        except Exception as e:  # ClientConnectionFailed, requests errors etc.
+            error = f"Connection failed: {e}" if str(e) else "Connection failed"
         # Reconnect from scratch next time.
         self.remote_clients.pop(name, None)
         print(f"Error fetching instances from remote {name}: {error}")
@@ -912,32 +886,25 @@ class LXDIndicatorApp:
         return instances, errors, set(remotes)
 
     def _refresh_once(self):
-        with self._lock:
-            previous = (
-                self.lxd_instances_cache,
-                self.lxd_error_message,
-                self.remote_errors,
-            )
-            local_instances = self._fetch_instances()
-            local_ok = self.lxd_error_message is None
-            remote_instances, self.remote_errors, remote_names = (
-                self._fetch_all_remote_instances()
-            )
-            self.lxd_instances_cache = sorted(
-                local_instances + remote_instances, key=_sort_key
-            )
-            current = (
-                self.lxd_instances_cache,
-                self.lxd_error_message,
-                self.remote_errors,
-            )
-            if current != previous:
-                GLib.idle_add(self._build_or_update_menu)
+        def state():
+            return self.lxd_instances_cache, self.lxd_error_message, self.remote_errors
 
-            listed = set(remote_names or ()) - set(self.remote_errors)
-            if local_ok:
-                listed.add(None)
-            self._track_changes(listed, remote_names)
+        previous = state()
+        local_instances = self._fetch_instances()
+        local_ok = self.lxd_error_message is None
+        remote_instances, self.remote_errors, remote_names = (
+            self._fetch_all_remote_instances()
+        )
+        self.lxd_instances_cache = sorted(
+            local_instances + remote_instances, key=_sort_key
+        )
+        if state() != previous:
+            GLib.idle_add(self._build_or_update_menu)
+
+        listed = set(remote_names or ()) - set(self.remote_errors)
+        if local_ok:
+            listed.add(None)
+        self._track_changes(listed, remote_names)
 
     def _track_changes(self, listed, remote_names):
         """Notifies about instance changes in the sources listed this refresh.
@@ -1012,43 +979,40 @@ class LXDIndicatorApp:
         return self.remote_clients.get(remote, (None, None))[1]
 
     def _run_action(self, remote, instance_name, action):
-        """Runs action on the instance; returns whether it succeeded."""
+        """Runs action on the instance; returns whether it succeeded.
+
+        Failures are reported with a notification.
+        """
         label = _instance_label(remote, instance_name)
-        with self._lock:
-            try:
-                client = self._client_for(remote)
-                if not client:
-                    raise RuntimeError("LXD client not available")
-                instance = client.instances.get(instance_name)
-                getattr(instance, action)(wait=True, timeout=30)
-                print(f"{action} completed on {label}.")
-            except NotFound:
-                error = "Instance not found."
-                self.lxd_error_message = f"Instance {label} not found."
-            except Exception as e:
-                error = str(e) or type(e).__name__
-                verb = _ACTION_TITLES.get(action, action).lower()
-                self.lxd_error_message = f"Failed to {verb} {label}: {e}"
-            else:
-                # Refresh right away so the new state shows up. On failure, leave
-                # the error visible until the next periodic refresh instead.
-                self._refresh_event.set()
-                return True
-            print(f"Error: {self.lxd_error_message}")
-            GLib.idle_add(
-                self.notifier.action_failed,
-                remote,
-                instance_name,
-                action,
-                error,
-            )
-            GLib.idle_add(self._build_or_update_menu)
-            return False
+        try:
+            client = self._client_for(remote)
+            if not client:
+                raise RuntimeError("Not connected.")
+            instance = client.instances.get(instance_name)
+            getattr(instance, action)(wait=True, timeout=30)
+        except NotFound:
+            error = "Instance not found."
+        except Exception as e:
+            error = str(e) or type(e).__name__
+        else:
+            print(f"{action} completed on {label}.")
+            # Refresh right away so the new state shows up.
+            self._refresh_event.set()
+            return True
+        print(f"Error: {action} on {label} failed: {error}")
+        GLib.idle_add(
+            self.notifier.action_failed,
+            remote,
+            instance_name,
+            _ACTION_TITLES[action],
+            error,
+        )
+        return False
 
     def _start_then_open_terminal(self, remote, instance_name):
         """Starts the instance, waits for it, then opens a terminal on it."""
         if self._run_action(remote, instance_name, "start"):
-            GLib.idle_add(self._open_terminal_idle, remote, instance_name)
+            GLib.idle_add(self._on_open_terminal, remote, instance_name)
 
     # ---- UI (GTK main thread) -------------------------------------------
 
@@ -1086,11 +1050,7 @@ class LXDIndicatorApp:
 
             item = Gtk.MenuItem()
             box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            icon_name = {
-                "running": ICON_RUNNING,
-                "stopped": ICON_STOPPED,
-                "frozen": ICON_PAUSED,
-            }.get(status, ICON_PENDING)
+            icon_name = STATUS_ICONS.get(status, ICON_PENDING)
             box.pack_start(
                 Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU),
                 False,
@@ -1107,24 +1067,25 @@ class LXDIndicatorApp:
                 action_item = Gtk.MenuItem(label=action_label)
                 action_item.connect(
                     "activate",
-                    functools.partial(self._on_instance_action, remote, name, action),
+                    self._in_background(self._run_action, remote, name, action),
                 )
                 action_item.set_sensitive(applies(status))
                 submenu.append(action_item)
             submenu.append(Gtk.SeparatorMenuItem())
-            if _needs_start_for_terminal(status):
+            # A stopped instance is started first; others need to be running.
+            if status == "stopped":
                 terminal = Gtk.MenuItem(label="Start & Terminal")
                 terminal.connect(
                     "activate",
-                    functools.partial(self._on_start_and_open_terminal, remote, name),
+                    self._in_background(self._start_then_open_terminal, remote, name),
                 )
             else:
                 terminal = Gtk.MenuItem(label="Terminal")
                 terminal.connect(
                     "activate",
-                    functools.partial(self._on_open_terminal, remote, name),
+                    lambda _w, r=remote, n=name: self._on_open_terminal(r, n),
                 )
-                terminal.set_sensitive(_can_open_terminal(status))
+            terminal.set_sensitive(Vte is not None and status in ("running", "stopped"))
             if Vte is None:
                 terminal.set_tooltip_text(
                     "Needs the VTE terminal widget (gir1.2-vte-2.91)"
@@ -1140,10 +1101,11 @@ class LXDIndicatorApp:
         refresh_item.connect("activate", lambda _w: self._refresh_event.set())
         self.menu.append(refresh_item)
 
-        autostart_item = Gtk.CheckMenuItem(label="Start at Login")
-        autostart_item.set_active(os.path.exists(AUTOSTART_FILE))
-        autostart_item.connect("toggled", self._on_autostart_toggled)
-        self.menu.append(autostart_item)
+        if SNAP_DIR:  # the launcher it copies is the snap's
+            autostart_item = Gtk.CheckMenuItem(label="Start at Login")
+            autostart_item.set_active(os.path.exists(AUTOSTART_FILE))
+            autostart_item.connect("toggled", self._on_autostart_toggled)
+            self.menu.append(autostart_item)
 
         quit_item = Gtk.MenuItem(label="Quit")
         quit_item.connect("activate", lambda _w: Gtk.main_quit())
@@ -1152,58 +1114,44 @@ class LXDIndicatorApp:
         self.menu.show_all()
         return False  # one-shot when used with GLib.idle_add
 
-    def _on_instance_action(self, remote, instance_name, action, _widget):
-        print(f"Action: {action} on instance {_instance_label(remote, instance_name)}")
-        threading.Thread(
-            target=self._run_action, args=(remote, instance_name, action), daemon=True
-        ).start()
+    @staticmethod
+    def _in_background(target, *args):
+        """A menu "activate" handler that runs target(*args) on a new thread."""
 
-    def _on_start_and_open_terminal(self, remote, instance_name, _widget):
-        print(f"Starting {_instance_label(remote, instance_name)} for a terminal")
-        threading.Thread(
-            target=self._start_then_open_terminal,
-            args=(remote, instance_name),
-            daemon=True,
-        ).start()
+        def handler(_widget):
+            threading.Thread(target=target, args=args, daemon=True).start()
 
-    def _open_terminal_idle(self, remote, instance_name):
-        self._on_open_terminal(remote, instance_name, None)
-        return False  # one-shot
+        return handler
 
-    def _on_open_terminal(self, remote, instance_name, _widget):
-        label = _instance_label(remote, instance_name)
+    def _on_open_terminal(self, remote, instance_name):
         client = self._client_for(remote)
         if client is None:
-            self.lxd_error_message = f"Can't open a terminal on {label}: not connected."
-            self._build_or_update_menu()
+            self.notifier.action_failed(
+                remote, instance_name, "Open Terminal", "Not connected."
+            )
             return
-        print(f"Opening a terminal on {label}")
+        print(f"Opening a terminal on {_instance_label(remote, instance_name)}")
         window = TerminalWindow(
             client, remote, instance_name, on_destroy=self._terminal_windows.discard
         )
         self._terminal_windows.add(window)
 
     def _on_autostart_toggled(self, widget):
-        # For snaps, snapd's `autostart:` support launches the app at login when
-        # this file exists in $SNAP_USER_DATA/.config/autostart.
+        # snapd's `autostart:` support launches the app at login when this
+        # file exists in $SNAP_USER_DATA/.config/autostart.
         try:
             if widget.get_active():
-                source = os.path.join(
-                    SNAP_DIR or "", "meta", "gui", f"{APP_NAME}.desktop"
-                )
-                if not os.path.exists(source):
-                    source = os.path.join(
-                        os.path.dirname(os.path.abspath(__file__)),
-                        "snap",
-                        "gui",
-                        f"{APP_NAME}.desktop",
-                    )
                 os.makedirs(AUTOSTART_DIR, exist_ok=True)
-                shutil.copyfile(source, AUTOSTART_FILE)
+                shutil.copyfile(
+                    os.path.join(SNAP_DIR, "meta", "gui", f"{APP_NAME}.desktop"),
+                    AUTOSTART_FILE,
+                )
             elif os.path.exists(AUTOSTART_FILE):
                 os.remove(AUTOSTART_FILE)
         except OSError as e:
             print(f"Failed to update autostart: {e}")
+            # Show what's really in place (toggling to it again is a no-op).
+            widget.set_active(os.path.exists(AUTOSTART_FILE))
 
 
 if __name__ == "__main__":

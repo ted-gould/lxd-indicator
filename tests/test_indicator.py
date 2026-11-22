@@ -13,7 +13,7 @@ import types
 import unittest
 from unittest import mock
 
-from pylxd.exceptions import ClientConnectionFailed, LXDAPIException
+from pylxd.exceptions import ClientConnectionFailed, LXDAPIException, NotFound
 
 SCRIPT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lxd-indicator.py"
@@ -338,25 +338,51 @@ class ActionTest(IndicatorTestCase):
         self.assertEqual(self.local_web.actions, ["start"])
         self.assertEqual(self.remote_web.actions, [])
 
-    def test_action_on_unknown_remote_reports_error(self):
-        self.app._run_action("gone", "web", "stop")
-        self.assertIn("gone:web", self.app.lxd_error_message)
+    def failed(self, remote, name, action):
+        """Runs a failing action; returns what action_failed was called with."""
+        self.app.notifier = mock.Mock()
+        with mock.patch.object(ind.GLib, "idle_add", lambda f, *a: f(*a)):
+            self.assertFalse(self.app._run_action(remote, name, action))
         self.assertFalse(self.app._refresh_event.is_set())
+        self.app.notifier.action_failed.assert_called_once()
+        return self.app.notifier.action_failed.call_args.args
+
+    def test_action_on_unknown_remote_reports_error(self):
+        self.assertEqual(
+            self.failed("gone", "web", "stop"),
+            ("gone", "web", "Stop", "Not connected."),
+        )
+
+    def test_missing_instance_reports_not_found(self):
+        self.local_web.start = mock.Mock(
+            side_effect=NotFound(mock.Mock(status_code=404))
+        )
+        self.assertEqual(
+            self.failed(None, "web", "start"),
+            (None, "web", "Start", "Instance not found."),
+        )
+
+    def test_error_without_message_reports_its_type(self):
+        self.local_web.stop = mock.Mock(side_effect=TimeoutError())
+        self.assertEqual(self.failed(None, "web", "stop")[3], "TimeoutError")
+
+    def test_action_failures_do_not_touch_the_listing_state(self):
+        self.app.lxd_error_message = None
+        self.failed("gone", "web", "stop")
+        self.assertIsNone(self.app.lxd_error_message)
 
     def test_freeze_and_thaw_go_to_the_instance(self):
         self.app._run_action(None, "web", "freeze")
         self.app._run_action(None, "web", "unfreeze")
         self.assertEqual(self.local_web.actions, ["freeze", "unfreeze"])
 
-    def test_failed_thaw_is_reported_as_thaw(self):
-        self.app.notifier = mock.Mock()
-        self.local_web.unfreeze = mock.Mock(side_effect=RuntimeError("boom"))
-        with mock.patch.object(ind.GLib, "idle_add", lambda f, *a: f(*a)):
-            self.app._run_action(None, "web", "unfreeze")
-        self.assertEqual(self.app.lxd_error_message, "Failed to thaw web: boom")
-        self.app.notifier.action_failed.assert_called_once_with(
-            None, "web", "unfreeze", "boom"
-        )
+    def test_failed_actions_are_notified_with_their_menu_title(self):
+        for action, title in [("start", "Start"), ("unfreeze", "Thaw")]:
+            with self.subTest(action=action):
+                setattr(self.local_web, action, mock.Mock(side_effect=OSError("boom")))
+                self.assertEqual(
+                    self.failed(None, "web", action), (None, "web", title, "boom")
+                )
 
     def test_menu_actions_follow_the_instance_status(self):
         self.servers.instances[LOCAL][:] = [
@@ -383,15 +409,6 @@ class ActionTest(IndicatorTestCase):
         self.assertEqual(
             enabled,
             [["Stop", "Thaw"], ["Start"], ["Stop", "Freeze"], ["Stop", "Freeze"]],
-        )
-
-    def test_failed_action_sends_a_notification(self):
-        self.app.notifier = mock.Mock()
-        self.local_web.start = mock.Mock(side_effect=RuntimeError("boom"))
-        with mock.patch.object(ind.GLib, "idle_add", lambda f, *a: f(*a)):
-            self.app._run_action(None, "web", "start")
-        self.app.notifier.action_failed.assert_called_once_with(
-            None, "web", "start", "boom"
         )
 
     def test_successful_action_sends_no_failure_notification(self):
@@ -531,8 +548,8 @@ class FakeNotifier(ind.Notifier):
         self.calls = []  # (replaces_id, summary, body)
         self.replies = []
 
-    def _dbus_notify(self, args, done):
-        self.calls.append((args[1], args[3], args[4]))
+    def _dbus_notify(self, replaces_id, summary, body, done):
+        self.calls.append((replaces_id, summary, body))
         self.replies.append(done)
 
     def reply(self, notification_id):
@@ -603,9 +620,9 @@ class NotifierTest(unittest.TestCase):
         self.assertEqual(self.notifier.calls[-1], (0, "Started: zeta:foo", ""))
 
     def test_action_failure(self):
-        self.notifier.action_failed(None, "web", "start", "boom")
+        self.notifier.action_failed(None, "web", "Start", "boom")
         self.notifier.reply(9)
-        self.notifier.action_failed(None, "web", "start", "boom again")
+        self.notifier.action_failed(None, "web", "Start", "boom again")
         self.assertEqual(
             self.notifier.calls,
             [
