@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- LXD mark, from canonical/lxd-ui public/assets/img/lxd-logo.svg -->
-<svg xmlns="http://www.w3.org/2000/svg" width="272" height="272" viewBox="0 0 272 272">
-  <rect width="272" height="272" fill="#ffffff"/>
+<!-- Panel glyph: mark only, transparent background, cropped to the mark. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="184" height="184" viewBox="44 44 184 184">
   <g fill="#000000" transform="translate(9.79 -122.45)">
     <path d="m173.07,243.26v-47.87l-46.86-27.1-46.86,27.1v47.87l-41.66,24.05v54.19l46.86,27.1,41.66-24.16,41.66,24.05,46.86-27.1v-54.19l-41.66-23.94Zm-46.86-62.77l36.36,21v41.77l-36.36,21.11-36.47-21v-41.77l36.47-21.11Zm-41.66,155.92l-36.36-21v-42l36.24-20.89,36.58,21.11v41.77l-36.47,21Zm119.68-21l-36.36,21-36.36-21v-41.77l36.58-21.11,36.24,20.89v42h-.11Z"/>
     <polygon points="171.49 319.69 191.47 307.84 191.47 284.35 171.49 296.1 171.49 319.69"/>

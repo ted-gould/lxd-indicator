@@ -35,9 +35,9 @@ SNAP_DIR = os.environ.get("SNAP")
 # In the snap the icons sit at $SNAP; in a source checkout, next to this file.
 ICON_DIR = SNAP_DIR or os.path.dirname(os.path.abspath(__file__))
 # Panel icons: monochrome to match the desktop theme, orange for alerts.
-ICON_LIGHT_THEME = os.path.join(ICON_DIR, "lxd_logo_light.svg")  # white with black
-ICON_DARK_THEME = os.path.join(ICON_DIR, "lxd_logo_dark.svg")  # black with white
-ICON_ALERT = os.path.join(ICON_DIR, "lxd_logo.svg")  # orange with white
+ICON_LIGHT_THEME = os.path.join(ICON_DIR, "lxd_logo_light.svg")  # black, no bg
+ICON_DARK_THEME = os.path.join(ICON_DIR, "lxd_logo_dark.svg")  # white, no bg
+ICON_ALERT = os.path.join(ICON_DIR, "lxd_logo.svg")  # orange, no bg
 
 # XDG desktop portal, which reports the user's light/dark preference.
 PORTAL_BUS_NAME = "org.freedesktop.portal.Desktop"
