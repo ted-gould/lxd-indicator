@@ -3,3 +3,5 @@ __pycache__/
 parts/
 stage/
 prime/
+.coverage
+__pycache__/
