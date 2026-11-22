@@ -2,7 +2,7 @@
 Name=LXD Indicator
 Comment=Shows status of LXD instances
 Exec=lxd-indicator
-Icon=${SNAP}/lxd_logo.png
+Icon=${SNAP}/lxd_logo.svg
 Terminal=false
 Type=Application
 Categories=Utility;
