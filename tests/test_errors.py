@@ -305,6 +305,8 @@ class AutostartTest(IndicatorTestCase):
         labels = [c.kwargs.get("label") for c in ind.Gtk.MenuItem.call_args_list]
         self.assertIn("Remove", labels)
         self.assertNotIn("Quit", labels)
+        # Events and the periodic refresh keep it current; no manual refresh.
+        self.assertNotIn("Refresh Now", labels)
 
     def test_no_start_at_login_menu_item(self):
         ind.Gtk.CheckMenuItem.reset_mock()

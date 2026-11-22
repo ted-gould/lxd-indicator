@@ -1097,10 +1097,6 @@ class LXDIndicatorApp:
         if instances:
             self.menu.append(Gtk.SeparatorMenuItem())
 
-        refresh_item = Gtk.MenuItem(label="Refresh Now")
-        refresh_item.connect("activate", lambda _w: self._refresh_event.set())
-        self.menu.append(refresh_item)
-
         remove_item = Gtk.MenuItem(label="Remove")
         remove_item.connect("activate", self._on_remove)
         self.menu.append(remove_item)
