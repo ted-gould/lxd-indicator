@@ -31,7 +31,10 @@ jobs:
 
     - name: Pre-install build dependencies with retries
       run: |
-        for snap in core24 gtk-common-themes gnome-46-2404-sdk gnome-46-2404; do
+        # snapcraft runs unprivileged in destructive mode, so every build snap the
+        # gnome extension needs (including mesa-2404 for its gpu-2404 part) must
+        # be installed up front with sudo.
+        for snap in core24 gtk-common-themes gnome-46-2404-sdk gnome-46-2404 mesa-2404; do
           echo "--- Installing $snap ---"
           for i in 1 2 3; do
             if sudo snap install "$snap"; then
@@ -58,6 +61,7 @@ jobs:
         sleep 10 # Give snapd time to process the new snap's interfaces
         sudo snap connect lxd-indicator:lxd lxd
         sudo snap connect lxd-indicator:gnome-46-2404 gnome-46-2404 || true
+        sudo snap connect lxd-indicator:gpu-2404 mesa-2404 || true
         snap connections lxd-indicator
 
     - name: Test the snap
