@@ -84,11 +84,17 @@ jobs:
         echo 'Exec=/bin/true' >> \$SERVICE_FILE
 
         xvfb-run dbus-run-session lxd-indicator > app.log 2>&1 &
-        sleep 30
+        # snap run can spend ~25s waiting on the fake systemd activation
+        # above, so poll for the success line rather than a fixed sleep.
+        result=1
+        for i in \$(seq 1 90); do
+          if grep -q 'Successfully connected to LXD' app.log; then result=0; break; fi
+          sleep 1
+        done
         echo '--- Application logs ---'
         cat app.log
         echo '------------------------'
-        grep 'Successfully connected to LXD' app.log
+        test \$result -eq 0
         pkill -f lxd-indicator.py || true
         "
 

@@ -28,6 +28,8 @@ apps:
     autostart: lxd-indicator.desktop
     environment:
       PYTHONPATH: $SNAP/usr/lib/python3/dist-packages
+      # Log lines go straight to the journal/terminal instead of a buffer.
+      PYTHONUNBUFFERED: '1'
 
 parts:
   lxd-indicator:
