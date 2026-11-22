@@ -79,4 +79,6 @@ parts:
         exit 1
       fi
       install -D -m 755 lxd-indicator.py "$CRAFT_PART_INSTALL/bin/lxd-indicator.py"
-      install -D -m 644 lxd_logo.png "$CRAFT_PART_INSTALL/lxd_logo.png"
+      for icon in lxd_logo.png lxd_logo_light.png lxd_logo_dark.png; do
+        install -D -m 644 "$icon" "$CRAFT_PART_INSTALL/$icon"
+      done
