@@ -72,13 +72,12 @@ REQUIRED_PLUGS = ("lxd",)
 RESPONSE_APP_CENTER = 1
 # In the snap the icons sit at $SNAP; in a source checkout, next to this file.
 ICON_DIR = SNAP_DIR or os.path.dirname(os.path.abspath(__file__))
-# Panel icon: a symbolic icon, looked up by name in ICON_THEME_DIR. The panel
-# recolors symbolic icons to match its own text, so the glyph stays visible on
-# light and dark panels alike, whatever the application theme is.
-ICON_THEME_DIR = os.path.join(ICON_DIR, "icons")
-ICON_NORMAL = "lxd-indicator-symbolic"
-ICON_NORMAL_FILE = os.path.join(
-    ICON_THEME_DIR, "hicolor", "scalable", "apps", f"{ICON_NORMAL}.svg"
+# Panel icon: a symbolic icon, passed to the panel as a file path. Hosts look
+# a name up in an app's own icon directory unreliably, but load paths as they
+# do the alert icon; a file named *-symbolic.svg is still recolored to match
+# the panel's text, so it stays visible on light and dark panels alike.
+ICON_NORMAL = os.path.join(
+    ICON_DIR, "icons", "hicolor", "scalable", "apps", "lxd-indicator-symbolic.svg"
 )
 ICON_ALERT = os.path.join(ICON_DIR, "lxd_logo.svg")  # orange, full color
 
@@ -573,7 +572,8 @@ class TerminalSession:
     connection the indicator already has. The terminal's input goes in with
     send_input() and resize(); output comes back through on_output(bytes).
     Once the shell exits or the connection drops, on_exit(exit code or None)
-    is called, once. Callbacks run on the websocket threads.
+    is called, once. Callbacks run on the websocket threads, or on the thread
+    in wait().
     """
 
     def __init__(
@@ -638,11 +638,11 @@ class TerminalSession:
             return ws
 
         try:
-            control = connect("control", lambda _message: None, lambda: None)
+            control = connect("control", lambda _message: None, self._on_ws_closed)
             with self._lock:
                 self._control = control
             # LXD starts the command once every websocket is connected.
-            data = connect("0", self._on_data, self._on_data_closed)
+            data = connect("0", self._on_data, self._on_ws_closed)
         except Exception:
             self.close()
             raise
@@ -656,6 +656,31 @@ class TerminalSession:
         for chunk in pending:
             self._send(data, chunk, binary=True)
         self._send_size()
+
+    def wait(self):
+        """Blocks until the shell exits, then reports it. Call after start().
+
+        LXD doesn't hang up the data websocket when the shell exits (`lxc`
+        waits for the exec operation instead), so this is how a logout
+        (Ctrl+D, `exit`) is noticed. If waiting fails, the websockets
+        closing is still reported.
+        """
+        if self._closing or self.operation_id is None:
+            return
+        try:
+            # No timeout: remote clients have one, but the shell may run on.
+            response = self.client.api.operations[self.operation_id].wait.get(
+                params={"timeout": -1}, timeout=None
+            )
+        except Exception as e:
+            if not self._closing:
+                print(f"Terminal: can't wait for {self.instance_name}: {e}")
+            return
+        try:
+            code = response.json()["metadata"]["metadata"]["return"]
+        except (ValueError, KeyError, TypeError):
+            code = None  # the operation ended without an exit status
+        self._exit(lambda: code)
 
     def send_input(self, data):
         """Sends keystrokes (bytes) to the shell."""
@@ -704,14 +729,22 @@ class TerminalSession:
         if message.data:
             self.on_output(bytes(message.data))
 
-    def _on_data_closed(self):
+    def _on_ws_closed(self):
+        with self._lock:
+            if self._data is None:  # still connecting: start() handles it
+                return
+        self._exit(self._exit_code)
+
+    def _exit(self, exit_code):
+        """Reports the end of the shell, once: on_exit(exit_code())."""
         with self._lock:
             if self._exited:
                 return
             self._exited = True
-            control = self._control
+            control, data = self._control, self._data
+        _close_quietly(data)
         _close_quietly(control)
-        self.on_exit(self._exit_code())
+        self.on_exit(exit_code())
 
     def _exit_code(self):
         """The shell's exit status, or None if it's unknown (connection lost)."""
@@ -767,6 +800,8 @@ class TerminalWindow:
         except Exception as e:
             print(f"Terminal for {self.label} failed: {e}")
             GLib.idle_add(self._show_message, f"Couldn't start a shell: {e}")
+            return
+        self.session.wait()
 
     def _feed(self, data):
         if not self._destroyed:
@@ -825,8 +860,6 @@ class LXDIndicatorApp:
             ICON_NORMAL,
             AppIndicator3.IndicatorCategory.SYSTEM_SERVICES,
         )
-        # The panel, not this process, loads the icon: tell it where to look.
-        self.indicator.set_icon_theme_path(ICON_THEME_DIR)
         self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
         self.indicator.set_title("LXD Indicator")
 
@@ -1236,7 +1269,7 @@ def main():
     if not ensure_required_plugs():
         print("Exiting: the lxd interface is not connected.")
         return 1
-    for icon_path in (ICON_NORMAL_FILE, ICON_ALERT):
+    for icon_path in (ICON_NORMAL, ICON_ALERT):
         if not os.path.exists(icon_path):
             print(f"Warning: icon not found at {icon_path}")
     if Vte is None:

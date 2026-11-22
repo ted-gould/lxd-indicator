@@ -16,6 +16,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -279,6 +280,55 @@ class TerminalSessionTest(unittest.TestCase):
         self.assertEqual(self.exits, [130])
         self.assertTrue(self.factory.control.closed)
         operation.wait.get.assert_called_once_with(params={"timeout": 3})
+
+    def test_wait_reports_the_exit_status_when_the_operation_ends(self):
+        # LXD leaves the data websocket open after the shell exits.
+        session = self.make_session()
+        session.start()
+        operation = self.client.api.operations.__getitem__.return_value
+        operation.wait.get.return_value.json.return_value = {
+            "metadata": {"metadata": {"return": 1}}
+        }
+        session.wait()
+        operation.wait.get.assert_called_once_with(params={"timeout": -1}, timeout=None)
+        self.assertEqual(self.exits, [1])
+        self.assertTrue(self.factory.data.closed)
+        self.assertTrue(self.factory.control.closed)
+        self.factory.data.on_closed()  # the hang-up that follows
+        self.assertEqual(self.exits, [1])
+        session.close()
+        self.assertEqual(self.factory.control.sent, [])  # no one to hang up
+
+    def test_control_websocket_closing_reports_the_exit(self):
+        session = self.make_session()
+        session.start()
+        self.factory.control.on_closed()
+        self.assertEqual(self.exits, [0])
+
+    def test_wait_without_exit_status_reports_unknown(self):
+        session = self.make_session()
+        session.start()
+        operation = self.client.api.operations.__getitem__.return_value
+        operation.wait.get.return_value.json.return_value = {"metadata": {}}
+        session.wait()
+        self.assertEqual(self.exits, [None])
+
+    def test_failed_wait_leaves_it_to_the_websockets(self):
+        session = self.make_session()
+        session.start()
+        operation = self.client.api.operations.__getitem__.return_value
+        operation.wait.get.side_effect = [ConnectionError("gone"), mock.DEFAULT]
+        session.wait()
+        self.assertEqual(self.exits, [])
+        self.factory.data.on_closed()
+        self.assertEqual(self.exits, [0])
+
+    def test_wait_after_close_returns_at_once(self):
+        session = self.make_session()
+        session.start()
+        session.close()
+        session.wait()
+        self.client.api.operations.__getitem__.return_value.wait.get.assert_not_called()
 
     def test_lost_connection_reports_unknown_exit_status(self):
         session = self.make_session()
@@ -794,7 +844,11 @@ class TerminalWindowTest(unittest.TestCase):
 
 
 class TerminalWindowLogoutTest(unittest.TestCase):
-    """The window with a real TerminalSession on fake websockets."""
+    """The window with a real TerminalSession on fake websockets.
+
+    Like LXD, the fake leaves the data websocket open when the shell exits:
+    the exec operation finishing is what says the shell is gone.
+    """
 
     def setUp(self):
         factory = self.factory = FakeWebsocketFactory()
@@ -806,12 +860,6 @@ class TerminalWindowLogoutTest(unittest.TestCase):
                 "TerminalSession",
                 lambda *a, **kw: real_session(*a, websocket_factory=factory, **kw),
             ),
-            # Run the session's thread and idle callbacks right away.
-            mock.patch.object(
-                ind.threading,
-                "Thread",
-                lambda target, daemon: mock.Mock(start=target),
-            ),
             mock.patch.object(ind.GLib, "idle_add", side_effect=lambda f, *a: f(*a)),
         ]
         for patch in patches:
@@ -822,25 +870,49 @@ class TerminalWindowLogoutTest(unittest.TestCase):
         ind.Vte.Terminal.return_value.get_column_count.return_value = 80
         ind.Vte.Terminal.return_value.get_row_count.return_value = 24
         self.client = make_client()
+        self.shell_exited = threading.Event()
+        self.exit_code = 0
+        self.wait_error = None
+        operation = self.client.api.operations.__getitem__.return_value
+        operation.wait.get.side_effect = self.operation_wait
+        self.closed = threading.Event()
+
         self.window = ind.TerminalWindow(self.client, None, "web")
         # GTK is mocked, so pass the destroy signal on by hand.
         gtk_window = self.window.window
         gtk_window.destroy.side_effect = lambda: self.window._on_destroy(gtk_window)
+        self.addCleanup(self.shell_exited.set)  # let the wait thread end
 
-    def exit_status(self, code):
-        operation = self.client.api.operations.__getitem__.return_value
-        operation.wait.get.return_value.json.return_value = {
-            "metadata": {"metadata": {"return": code}}
+    def operation_wait(self, params, timeout=None):
+        """GET /1.0/operations/<id>/wait: returns once the shell has exited."""
+        if params["timeout"] == -1:
+            self.assertIsNone(timeout)
+            self.shell_exited.wait(10)
+        if self.wait_error:
+            raise self.wait_error
+        response = mock.Mock()
+        response.json.return_value = {
+            "metadata": {"metadata": {"return": self.exit_code}}
         }
+        return response
+
+    def wait_until(self, condition):
+        for _ in range(200):
+            if condition():
+                return
+            time.sleep(0.01)
+        self.fail("timed out")
 
     def test_ctrl_d_logs_out_and_closes_the_window(self):
+        self.wait_until(lambda: len(self.factory.created) == 2)
         # Ctrl+D makes the shell exit with the last command's status.
-        self.exit_status(1)
+        self.exit_code = 1
         self.window._on_commit(self.window.terminal, "\x04", 1)
-        self.assertIn((b"\x04", True), self.factory.data.sent)
+        self.wait_until(lambda: (b"\x04", True) in self.factory.data.sent)
         self.window.window.destroy.assert_not_called()
 
-        self.factory.data.on_closed()  # the shell is gone: LXD closes the data
+        self.shell_exited.set()  # the operation ends; the data socket stays up
+        self.wait_until(lambda: self.window.window.destroy.called)
         self.window.window.destroy.assert_called_once()
         self.assertTrue(self.factory.control.closed)
         self.assertTrue(self.factory.data.closed)
@@ -848,8 +920,8 @@ class TerminalWindowLogoutTest(unittest.TestCase):
         self.assertEqual(control_messages(self.factory.control), [])
 
     def test_dropped_connection_closes_the_window(self):
-        operation = self.client.api.operations.__getitem__.return_value
-        operation.wait.get.side_effect = ConnectionError("machine went away")
+        self.wait_until(lambda: len(self.factory.created) == 2)
+        self.wait_error = ConnectionError("machine went away")
         self.factory.data.on_closed()
         self.window.window.destroy.assert_called_once()
 
