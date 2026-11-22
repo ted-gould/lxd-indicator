@@ -1,156 +1,190 @@
 #!/usr/bin/env python3
+"""System tray indicator showing the state of local LXD instances."""
+
+import functools
+import os
+import shutil
+import signal
+import subprocess
+import threading
+from urllib.parse import quote
 
 import gi
-gi.require_version('Gtk', '3.0')
-gi.require_version('AppIndicator3', '0.1')
-from gi.repository import Gtk, AppIndicator3, GLib
 
-import os
-import signal
-import threading
-import time
-import functools
-from pylxd import client as pylxd_client
+gi.require_version('Gtk', '3.0')
+try:
+    # Ubuntu 24.04+ ships the Ayatana fork; the old libappindicator is gone.
+    gi.require_version('AyatanaAppIndicator3', '0.1')
+    from gi.repository import AyatanaAppIndicator3 as AppIndicator3
+except (ValueError, ImportError):
+    gi.require_version('AppIndicator3', '0.1')
+    from gi.repository import AppIndicator3
+from gi.repository import GLib, Gtk
+
+from pylxd import Client
 from pylxd.exceptions import ClientConnectionFailed, LXDAPIException, NotFound
 
 APPINDICATOR_ID = 'lxd-status-indicator'
-# Path to the LXD logo icon. Ensure this path is correct.
+APP_NAME = 'lxd-indicator'
+REFRESH_INTERVAL = 10  # seconds
+
 SNAP_DIR = os.environ.get('SNAP')
 if SNAP_DIR:
     LXD_MAIN_ICON_PATH = os.path.join(SNAP_DIR, 'lxd_logo.png')
 else:
-    # Fallback for running outside a snap (e.g., during development)
-    # Assumes script is in the project root alongside lxd_logo.png for local dev.
+    # Running from a source checkout during development.
     LXD_MAIN_ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lxd_logo.png')
-REFRESH_INTERVAL = 10  # seconds
+
+# Candidate LXD unix sockets, in order of preference. Inside a strict snap the
+# `lxd` interface only grants access to the LXD snap's socket.
+LXD_SOCKET_CANDIDATES = [
+    '/var/snap/lxd/common/lxd/unix.socket',
+    '/var/lib/lxd/unix.socket',
+]
+
+AUTOSTART_DIR = os.path.join(
+    os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config')), 'autostart')
+AUTOSTART_FILE = os.path.join(AUTOSTART_DIR, f'{APP_NAME}.desktop')
 
 # Freedesktop icon names for instance states
 ICON_RUNNING = 'media-playback-start-symbolic'
 ICON_STOPPED = 'media-playback-stop-symbolic'
-ICON_PAUSED = 'media-playback-pause-symbolic' # For "Frozen" state
-ICON_ERROR = 'dialog-error-symbolic'
-ICON_PENDING = 'view-refresh-symbolic' # For transitional states or unknown
+ICON_PAUSED = 'media-playback-pause-symbolic'  # "Frozen" state
+ICON_PENDING = 'view-refresh-symbolic'  # transitional / unknown states
+
+
+def _lxd_socket_path():
+    if 'LXD_DIR' in os.environ:
+        return os.path.join(os.environ['LXD_DIR'], 'unix.socket')
+    for path in LXD_SOCKET_CANDIDATES:
+        if os.path.exists(path):
+            return path
+    return LXD_SOCKET_CANDIDATES[0]
+
+
+def _snap_plug_connected(plug):
+    """Returns True/False for a snap plug's connection state, None if unknown."""
+    if not SNAP_DIR:
+        return None
+    try:
+        result = subprocess.run(['snapctl', 'is-connected', plug],
+                                capture_output=True, timeout=5)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _diagnose_connection_failure(socket_path, error):
+    """Turns a low-level connection failure into an actionable message."""
+    if _snap_plug_connected('lxd') is False:
+        return ("LXD interface not connected. Run: "
+                "sudo snap connect lxd-indicator:lxd lxd")
+    if not os.path.exists(socket_path):
+        return f"LXD socket not found at {socket_path}. Is LXD installed and running?"
+    if 'Permission denied' in str(error) or not os.access(socket_path, os.R_OK | os.W_OK):
+        return ("Permission denied on the LXD socket. Add yourself to the 'lxd' group "
+                "(sudo usermod -aG lxd $USER) and log out and back in.")
+    return f"LXD connection failed: {error}"
+
 
 class LXDIndicatorApp:
     def __init__(self):
         self.lxd_client = None
-        self.use_legacy_api = False # Flag to determine if using containers (True) or instances (False)
+        self.lxd_error_message = None
+        self.lxd_instances_cache = []
+        self._lock = threading.Lock()
+        self._refresh_event = threading.Event()
+
         self.indicator = AppIndicator3.Indicator.new(
             APPINDICATOR_ID,
-            LXD_MAIN_ICON_PATH, # Use the resolved path
-            AppIndicator3.IndicatorCategory.SYSTEM_SERVICES
+            LXD_MAIN_ICON_PATH,
+            AppIndicator3.IndicatorCategory.SYSTEM_SERVICES,
         )
         self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+        self.indicator.set_title('LXD Indicator')
 
         self.menu = Gtk.Menu()
         self.indicator.set_menu(self.menu)
+        self._build_or_update_menu()
 
-        self.lxd_instances_cache = [] # Initialize as an empty list
-        self.lxd_error_message = None # To store any persistent LXD connection error
-
-        self._connect_lxd_initial() # Initial attempt to connect
-
-        self.refresh_thread = threading.Thread(target=self._periodic_refresh_lxd_data)
-        self.refresh_thread.daemon = True
+        self.refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True)
         self.refresh_thread.start()
 
-        # Initial menu build based on initial connection attempt
-        GLib.idle_add(self._build_or_update_menu)
+    # ---- LXD access (worker thread) -------------------------------------
 
-
-    def _connect_lxd_initial(self):
-        """Attempts to connect to LXD and determines API version."""
+    def _connect_lxd(self):
+        socket_path = _lxd_socket_path()
         try:
-            self.lxd_client = pylxd_client.Client()
-            # Try to determine the API version
-            try:
-                self.lxd_client.instances.all() # Test for modern 'instances' API
-                self.use_legacy_api = False
-                self.lxd_error_message = None
-                print("Successfully connected to LXD using modern 'instances' API.")
-            except AttributeError:
-                print("'instances' API not found, trying legacy 'containers' API.")
-                self.lxd_client.containers.all() # Test for legacy 'containers' API
-                self.use_legacy_api = True
-                self.lxd_error_message = None
-                print("Successfully connected to LXD using legacy 'containers' API.")
-        except ClientConnectionFailed:
-            self.lxd_client = None
-            self.lxd_error_message = "LXD Connection Failed: Daemon unreachable or permission issue."
-            print(f"Error: {self.lxd_error_message}")
-        except LXDAPIException as e:
-            self.lxd_client = None
-            self.lxd_error_message = f"LXD API Error during connection: {e}"
-            print(f"Error: {self.lxd_error_message}")
-        except AttributeError: # Catch if neither.instances nor.containers exist after client init
-            self.lxd_client = None
-            self.lxd_error_message = "Failed to detect usable pylxd API (neither instances nor containers found)."
-            print(f"Error: {self.lxd_error_message}")
-        except Exception as e: # Catch any other unexpected error during init
-            self.lxd_client = None
-            self.lxd_error_message = f"Unexpected error connecting to LXD: {e}"
-            print(f"Error: {self.lxd_error_message}")
-
-
-    def _fetch_lxd_instances_with_error_handling(self):
-        """Fetches LXD instances/containers and handles errors, updating self.lxd_error_message."""
-        if not self.lxd_client:
-            self._connect_lxd_initial()
-            if not self.lxd_client:
-                return # Always return a list
-
-        try:
-            instances_data = []
-            if self.use_legacy_api:
-                lxd_items = self.lxd_client.containers.all()
-            else:
-                lxd_items = self.lxd_client.instances.all()
-
-            for item in lxd_items:
-                instances_data.append({
-                    'name': item.name,
-                    'status': item.status.lower(),
-                    'type': getattr(item, 'type', 'container').lower()
-                })
+            self.lxd_client = Client(endpoint=f"http+unix://{quote(socket_path, safe='')}")
             self.lxd_error_message = None
-            return instances_data
-        except AttributeError as e:
+            print(f"Successfully connected to LXD at {socket_path}.")
+        except ClientConnectionFailed as e:
             self.lxd_client = None
-            self.lxd_error_message = f"LXD API Attribute Error during fetch: {e}. Re-initializing connection."
-            print(f"Error during fetch: {self.lxd_error_message}")
-            return []
-        except ClientConnectionFailed:
-            self.lxd_client = None
-            self.lxd_error_message = "LXD Connection Lost: Daemon unreachable."
-            print(f"Error during fetch: {self.lxd_error_message}")
-            return []
+            self.lxd_error_message = _diagnose_connection_failure(socket_path, e)
+            print(f"Error: {self.lxd_error_message} ({e})")
         except LXDAPIException as e:
-            self.lxd_error_message = f"LXD API Error during fetch: {e}"
-            print(f"Error during fetch: {self.lxd_error_message}")
-            return []
-        except Exception as e:
-            self.lxd_error_message = f"Unexpected error fetching instances: {e}"
-            print(f"Error during fetch: {self.lxd_error_message}")
-            return []
+            self.lxd_client = None
+            self.lxd_error_message = f"LXD API error during connection: {e}"
+            print(f"Error: {self.lxd_error_message}")
 
+    def _fetch_instances(self):
+        """Returns a list of instance dicts; sets lxd_error_message on failure."""
+        if not self.lxd_client:
+            self._connect_lxd()
+            if not self.lxd_client:
+                return []
+        try:
+            instances = [{
+                'name': item.name,
+                'status': item.status.lower(),
+                'type': getattr(item, 'type', 'container').lower(),
+            } for item in self.lxd_client.instances.all()]
+            self.lxd_error_message = None
+            return sorted(instances, key=lambda i: i['name'])
+        except LXDAPIException as e:
+            self.lxd_error_message = f"LXD API error: {e}"
+        except Exception as e:  # requests ConnectionError etc. — reconnect next time
+            self.lxd_client = None
+            self.lxd_error_message = f"Lost connection to LXD: {e}"
+        print(f"Error during fetch: {self.lxd_error_message}")
+        return []
 
-    def _periodic_refresh_lxd_data(self):
-        """Target function for the refresh thread."""
-        while True:
-            fetched_data = self._fetch_lxd_instances_with_error_handling()
-            
-            if fetched_data is None: # Should ideally not happen if _fetch always returns a list
-                print("Warning: _fetch_lxd_instances_with_error_handling returned None. Defaulting to.")
-                fetched_data = []
-
-            if fetched_data!= self.lxd_instances_cache or \
-               (self.lxd_error_message and (not self.lxd_instances_cache or self.lxd_instances_cache is None)):
-                self.lxd_instances_cache = fetched_data
+    def _refresh_once(self):
+        with self._lock:
+            previous = (self.lxd_instances_cache, self.lxd_error_message)
+            self.lxd_instances_cache = self._fetch_instances()
+            if (self.lxd_instances_cache, self.lxd_error_message) != previous:
                 GLib.idle_add(self._build_or_update_menu)
-            time.sleep(REFRESH_INTERVAL)
+
+    def _refresh_loop(self):
+        while True:
+            self._refresh_once()
+            self._refresh_event.wait(REFRESH_INTERVAL)
+            self._refresh_event.clear()
+
+    def _run_action(self, instance_name, action):
+        with self._lock:
+            try:
+                if not self.lxd_client:
+                    raise RuntimeError("LXD client not available")
+                instance = self.lxd_client.instances.get(instance_name)
+                getattr(instance, action)(wait=True, timeout=30)
+                print(f"{action} completed on {instance_name}.")
+            except NotFound:
+                self.lxd_error_message = f"Instance {instance_name} not found."
+            except Exception as e:
+                self.lxd_error_message = f"Failed to {action} {instance_name}: {e}"
+            else:
+                # Refresh right away so the new state shows up. On failure, leave
+                # the error visible until the next periodic refresh instead.
+                self._refresh_event.set()
+                return
+            print(f"Error: {self.lxd_error_message}")
+            GLib.idle_add(self._build_or_update_menu)
+
+    # ---- UI (GTK main thread) -------------------------------------------
 
     def _build_or_update_menu(self):
-        """Builds or rebuilds the indicator menu. Must be called from main GTK thread via GLib.idle_add."""
         for item in self.menu.get_children():
             self.menu.remove(item)
 
@@ -160,118 +194,78 @@ class LXDIndicatorApp:
             self.menu.append(error_item)
             self.menu.append(Gtk.SeparatorMenuItem())
 
-        current_instances_to_iterate = self.lxd_instances_cache
-        if current_instances_to_iterate is None: # Defensive check
-            print("Warning: lxd_instances_cache is None in _build_or_update_menu. Displaying empty list.")
-            current_instances_to_iterate = []
+        instances = list(self.lxd_instances_cache)
+        for info in instances:
+            name, status = info['name'], info['status']
 
-        for instance_info in current_instances_to_iterate:
-            name = instance_info['name']
-            status = instance_info['status']
+            item = Gtk.MenuItem()
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            icon_name = {
+                'running': ICON_RUNNING,
+                'stopped': ICON_STOPPED,
+                'frozen': ICON_PAUSED,
+            }.get(status, ICON_PENDING)
+            box.pack_start(Gtk.Image.new_from_icon_name(icon_name, Gtk.IconSize.MENU),
+                           False, False, 0)
+            box.pack_start(Gtk.Label(label=name, xalign=0), True, True, 0)
+            item.add(box)
 
-            menu_item_instance = Gtk.MenuItem()
-            item_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            submenu = Gtk.Menu()
+            start = Gtk.MenuItem(label="Start")
+            start.connect('activate', functools.partial(self._on_instance_action, name, 'start'))
+            start.set_sensitive(status not in ('running', 'frozen'))
+            stop = Gtk.MenuItem(label="Stop")
+            stop.connect('activate', functools.partial(self._on_instance_action, name, 'stop'))
+            stop.set_sensitive(status in ('running', 'frozen'))
+            submenu.append(start)
+            submenu.append(stop)
+            item.set_submenu(submenu)
+            self.menu.append(item)
 
-            status_icon_image = Gtk.Image()
-            icon_name = ICON_PENDING
-            if status == 'running':
-                icon_name = ICON_RUNNING
-            elif status == 'stopped':
-                icon_name = ICON_STOPPED
-            elif status == 'frozen':
-                icon_name = ICON_PAUSED
-            status_icon_image.set_from_icon_name(icon_name, Gtk.IconSize.MENU)
-            item_box.pack_start(status_icon_image, False, False, 0)
-
-            instance_label = Gtk.Label(label=name)
-            item_box.pack_start(instance_label, True, True, 0)
-            menu_item_instance.add(item_box)
-
-            submenu_actions = Gtk.Menu()
-            start_action_item = Gtk.MenuItem(label="Start")
-            start_action_item.connect('activate', functools.partial(self._on_instance_action, name, 'start'))
-            start_action_item.set_sensitive(status not in ['running', 'frozen'])
-
-            stop_action_item = Gtk.MenuItem(label="Stop")
-            stop_action_item.connect('activate', functools.partial(self._on_instance_action, name, 'stop'))
-            stop_action_item.set_sensitive(status in ['running', 'frozen'])
-
-            submenu_actions.append(start_action_item)
-            submenu_actions.append(stop_action_item)
-            menu_item_instance.set_submenu(submenu_actions)
-            self.menu.append(menu_item_instance)
-
-        if current_instances_to_iterate:
+        if instances:
             self.menu.append(Gtk.SeparatorMenuItem())
 
         refresh_item = Gtk.MenuItem(label="Refresh Now")
-        refresh_item.connect('activate', self._on_manual_refresh)
+        refresh_item.connect('activate', lambda _w: self._refresh_event.set())
         self.menu.append(refresh_item)
 
+        autostart_item = Gtk.CheckMenuItem(label="Start at Login")
+        autostart_item.set_active(os.path.exists(AUTOSTART_FILE))
+        autostart_item.connect('toggled', self._on_autostart_toggled)
+        self.menu.append(autostart_item)
+
         quit_item = Gtk.MenuItem(label="Quit")
-        quit_item.connect('activate', self._on_quit)
+        quit_item.connect('activate', lambda _w: Gtk.main_quit())
         self.menu.append(quit_item)
 
         self.menu.show_all()
+        return False  # one-shot when used with GLib.idle_add
 
     def _on_instance_action(self, instance_name, action, _widget):
-        """Handles start/stop actions for an instance."""
         print(f"Action: {action} on instance {instance_name}")
-        if not self.lxd_client:
-            print("LXD client not available. Action aborted.")
-            self.lxd_error_message = "LXD client not available for action."
-            GLib.idle_add(self._build_or_update_menu)
-            return
+        threading.Thread(target=self._run_action, args=(instance_name, action),
+                         daemon=True).start()
 
+    def _on_autostart_toggled(self, widget):
+        # For snaps, snapd's `autostart:` support launches the app at login when
+        # this file exists in $SNAP_USER_DATA/.config/autostart.
         try:
-            if self.use_legacy_api:
-                instance = self.lxd_client.containers.get(instance_name)
-            else:
-                instance = self.lxd_client.instances.get(instance_name)
-            
-            current_status = instance.status.lower()
-            if action == 'start':
-                if current_status not in ['running', 'frozen']:
-                    instance.start(wait=False, timeout=30)
-                    print(f"Start command sent to {instance_name}.")
-            elif action == 'stop':
-                if current_status in ['running', 'frozen']:
-                    instance.stop(wait=False, timeout=30)
-                    print(f"Stop command sent to {instance_name}.")
-        except NotFound:
-            print(f"Error: Instance {instance_name} not found.")
-            self.lxd_error_message = f"Instance {instance_name} not found."
-        except LXDAPIException as e:
-            print(f"LXD API Error performing action {action} on {instance_name}: {e}")
-            self.lxd_error_message = f"API error on {instance_name}: {e}"
-        except Exception as e:
-            print(f"Unexpected error during action {action} on {instance_name}: {e}")
-            self.lxd_error_message = f"Unexpected error on {instance_name}: {e}"
-        
-        self._on_manual_refresh(None)
+            if widget.get_active():
+                source = os.path.join(SNAP_DIR or '', 'meta', 'gui', f'{APP_NAME}.desktop')
+                if not os.path.exists(source):
+                    source = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          'snap', 'gui', f'{APP_NAME}.desktop')
+                os.makedirs(AUTOSTART_DIR, exist_ok=True)
+                shutil.copyfile(source, AUTOSTART_FILE)
+            elif os.path.exists(AUTOSTART_FILE):
+                os.remove(AUTOSTART_FILE)
+        except OSError as e:
+            print(f"Failed to update autostart: {e}")
 
-    def _on_manual_refresh(self, _widget):
-        """Handles the 'Refresh' menu item click."""
-        print("Manual refresh triggered.")
-        current_data = self._fetch_lxd_instances_with_error_handling()
-        if current_data is None: # Defensive check
-            current_data = []
-        
-        if current_data!= self.lxd_instances_cache or self.lxd_error_message:
-            self.lxd_instances_cache = current_data
-            GLib.idle_add(self._build_or_update_menu)
-
-    def _on_quit(self, _widget):
-        """Handles the 'Quit' menu item click."""
-        print("Quitting LXD Indicator App.")
-        Gtk.main_quit()
 
 if __name__ == "__main__":
     if not os.path.exists(LXD_MAIN_ICON_PATH):
-        print(f"Error: LXD main icon not found at {LXD_MAIN_ICON_PATH}")
-        print("Please ensure lxd_logo.png is in the same directory as the script, or update LXD_MAIN_ICON_PATH.")
-
+        print(f"Warning: LXD main icon not found at {LXD_MAIN_ICON_PATH}")
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     app = LXDIndicatorApp()
     Gtk.main()
-

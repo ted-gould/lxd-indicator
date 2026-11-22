@@ -8,10 +8,10 @@ on:
 
 jobs:
   build-and-test-snap:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
 
     - name: Install dependencies
       run: |
@@ -31,7 +31,10 @@ jobs:
 
     - name: Pre-install build dependencies with retries
       run: |
-        for snap in gtk-common-themes gnome-42-2204-sdk gnome-42-2204; do
+        # snapcraft runs unprivileged in destructive mode, so every build snap the
+        # gnome extension needs (including mesa-2404 for its gpu-2404 part) must
+        # be installed up front with sudo.
+        for snap in core24 gtk-common-themes gnome-46-2404-sdk gnome-46-2404 mesa-2404; do
           echo "--- Installing $snap ---"
           for i in 1 2 3; do
             if sudo snap install "$snap"; then
@@ -57,37 +60,51 @@ jobs:
         sudo snap install --dangerous lxd-indicator_*.snap
         sleep 10 # Give snapd time to process the new snap's interfaces
         sudo snap connect lxd-indicator:lxd lxd
+        sudo snap connect lxd-indicator:gnome-46-2404 gnome-46-2404 || true
+        sudo snap connect lxd-indicator:gpu-2404 mesa-2404 || true
+        snap connections lxd-indicator
+        ls -l /snap/lxd-indicator/current/usr/bin/python3* || true
+        ls /snap/lxd-indicator/current/lib/python3/site-packages || true
 
     - name: Test the snap
       run: |
-        set -ex
-        # Run test with the lxd group's permissions.
-        sg lxd -c "
-        set -ex
+        set -x
+        # Give the runner user a real systemd user session and session bus.
+        # `snap run` creates a transient systemd scope over the session bus
+        # for every launch, so a bare dbus-run-session (or a fake
+        # org.freedesktop.systemd1 service) leaves it stuck or failing.
+        sudo loginctl enable-linger "$USER"
+        export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+        for i in $(seq 1 30); do
+          [ -S "$XDG_RUNTIME_DIR/bus" ] && break
+          sleep 1
+        done
+        ls -l "$XDG_RUNTIME_DIR"
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
         export GDK_BACKEND=x11
-        mkdir -p /home/runner/snap/lxd-indicator/common/.cache
 
-        # Create a fake systemd service to satisfy AppIndicator3.
-        # The indicator library tries to activate this service on startup,
-        # and fails if it's not present. We can create a dummy service
-        # that does nothing but successfully activates.
-        mkdir -p /home/runner/.local/share/dbus-1/services
-        SERVICE_FILE=/home/runner/.local/share/dbus-1/services/org.freedesktop.systemd1.service
-        echo '[D-BUS Service]' > \$SERVICE_FILE
-        echo 'Name=org.freedesktop.systemd1' >> \$SERVICE_FILE
-        echo 'Exec=/bin/true' >> \$SERVICE_FILE
+        # Start the app with the lxd group, which this job's shell lacks.
+        sg lxd -c "xvfb-run -a lxd-indicator > app.log 2>&1 &"
 
-        xvfb-run dbus-run-session lxd-indicator > app.log 2>&1 &
-        sleep 30
+        result=1
+        for i in $(seq 1 90); do
+          if grep -q 'Successfully connected to LXD' app.log; then result=0; break; fi
+          sleep 1
+        done
         echo '--- Application logs ---'
         cat app.log
         echo '------------------------'
-        grep 'Successfully connected to LXD' app.log
-        pkill -f lxd-indicator.py
-        "
+        if [ $result -ne 0 ]; then
+          echo '--- Processes ---'
+          ps -eo pid,ppid,stat,wchan:32,args --forest | grep -B2 -A6 -E 'lxd-indicator|xvfb' | grep -v grep
+          echo '--- AppArmor denials / snap messages ---'
+          sudo journalctl -b --no-pager | grep -E 'apparmor="DENIED"|snap-confine|lxd-indicator' | tail -60
+        fi
+        pkill -f lxd-indicator.py || true
+        test $result -eq 0
 
     - name: Upload snap artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: lxd-indicator-snap
         path: lxd-indicator_*.snap
