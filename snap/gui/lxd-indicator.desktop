@@ -1,7 +1,7 @@
-Desktop Entry]
+[Desktop Entry]
 Name=LXD Indicator
 Comment=Shows status of LXD instances
-Exec=lxd-indicator.py
+Exec=lxd-indicator
 Icon=${SNAP}/lxd_logo.png
 Terminal=false
 Type=Application
