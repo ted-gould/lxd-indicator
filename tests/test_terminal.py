@@ -761,8 +761,8 @@ class TerminalMenuTest(IndicatorTestCase):
         )
 
 
-class TerminalWindowTest(unittest.TestCase):
-    """The GTK side, with GTK, GLib and VTE mocked."""
+class TerminalWindowTestCase(unittest.TestCase):
+    """A TerminalWindow with GTK, GLib and VTE mocked."""
 
     def setUp(self):
         patches = [
@@ -789,6 +789,10 @@ class TerminalWindowTest(unittest.TestCase):
 
     def callbacks(self):
         return ind.TerminalSession.call_args.kwargs
+
+
+class TerminalWindowTest(TerminalWindowTestCase):
+    """The GTK side, with GTK, GLib and VTE mocked."""
 
     def test_session_is_for_the_instance_and_terminal_size(self):
         args, kwargs = ind.TerminalSession.call_args
@@ -841,6 +845,83 @@ class TerminalWindowTest(unittest.TestCase):
         self.callbacks()["on_exit"](0)
         self.terminal.feed.assert_not_called()
         self.window.window.destroy.assert_not_called()
+
+
+class TerminalWindowClipboardTest(TerminalWindowTestCase):
+    """Copy and paste: Ctrl+Shift+C/V and the right-click menu."""
+
+    CONTROL, SHIFT, ALT = 4, 1, 8
+
+    def setUp(self):
+        super().setUp()
+        gdk = ind.Gdk
+        gdk.ModifierType.CONTROL_MASK = self.CONTROL
+        gdk.ModifierType.SHIFT_MASK = self.SHIFT
+        gdk.KEY_a, gdk.KEY_c, gdk.KEY_v = ord("a"), ord("c"), ord("v")
+        gdk.keyval_to_lower.side_effect = lambda k: ord(chr(k).lower())
+        gdk.BUTTON_SECONDARY = 3
+        ind.Gtk.accelerator_get_default_mod_mask.return_value = (
+            self.CONTROL | self.SHIFT | self.ALT
+        )
+        self.terminal.get_has_selection.return_value = True
+
+    def key(self, char, state):
+        return self.window._on_key_press(
+            self.terminal, mock.Mock(keyval=ord(char), state=state)
+        )
+
+    def test_ctrl_shift_c_copies_the_selection(self):
+        self.assertTrue(self.key("C", self.CONTROL | self.SHIFT))
+        self.terminal.copy_clipboard_format.assert_called_once_with(ind.Vte.Format.TEXT)
+
+    def test_copy_without_a_selection_keeps_the_clipboard(self):
+        self.terminal.get_has_selection.return_value = False
+        self.assertTrue(self.key("C", self.CONTROL | self.SHIFT))
+        self.terminal.copy_clipboard_format.assert_not_called()
+
+    def test_ctrl_shift_v_pastes(self):
+        # Locks such as Num Lock (16) are ignored.
+        self.assertTrue(self.key("V", self.CONTROL | self.SHIFT | 16))
+        self.terminal.paste_clipboard.assert_called_once_with()
+
+    def test_ctrl_shift_a_selects_all(self):
+        self.assertTrue(self.key("A", self.CONTROL | self.SHIFT))
+        self.terminal.select_all.assert_called_once_with()
+
+    def test_plain_ctrl_c_and_v_go_to_the_shell(self):
+        self.assertFalse(self.key("c", self.CONTROL))
+        self.assertFalse(self.key("v", self.CONTROL))
+        self.assertFalse(self.key("C", self.CONTROL | self.SHIFT | self.ALT))
+        self.assertFalse(self.key("X", self.CONTROL | self.SHIFT))
+        self.terminal.copy_clipboard_format.assert_not_called()
+        self.terminal.paste_clipboard.assert_not_called()
+
+    def click(self, button):
+        event = mock.Mock(type=ind.Gdk.EventType.BUTTON_PRESS, button=button)
+        return event, self.window._on_button_press(self.terminal, event)
+
+    def test_right_click_shows_copy_and_paste(self):
+        ind.Gtk.MenuItem.side_effect = lambda label: mock.Mock(label=label)
+        self.addCleanup(setattr, ind.Gtk.MenuItem, "side_effect", None)
+        self.terminal.get_has_selection.return_value = False
+        event, handled = self.click(3)
+        self.assertTrue(handled)
+        menu = ind.Gtk.Menu.return_value
+        menu.popup_at_pointer.assert_called_once_with(event)
+        items = {c.args[0].label: c.args[0] for c in menu.append.call_args_list}
+        self.assertEqual(list(items), ["Copy", "Paste", "Select All"])
+        items["Copy"].set_sensitive.assert_called_with(False)
+        items["Paste"].set_sensitive.assert_called_with(True)
+        activate = items["Paste"].connect.call_args.args
+        self.assertEqual(activate[0], "activate")
+        activate[1](items["Paste"])
+        self.terminal.paste_clipboard.assert_called_once_with()
+
+    def test_other_clicks_are_left_to_the_terminal(self):
+        # Left click selects; middle click pastes the primary selection.
+        self.assertFalse(self.click(1)[1])
+        self.assertFalse(self.click(2)[1])
+        ind.Gtk.Menu.assert_not_called()
 
 
 class TerminalWindowLogoutTest(unittest.TestCase):

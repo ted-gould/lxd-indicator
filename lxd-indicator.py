@@ -25,7 +25,8 @@ try:
 except (ValueError, ImportError):
     gi.require_version("AppIndicator3", "0.1")
     from gi.repository import AppIndicator3
-from gi.repository import Gio, GLib, Gtk
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gio, GLib, Gtk
 
 try:
     # The terminal widget behind GNOME Terminal; optional, for "Terminal".
@@ -798,6 +799,9 @@ class TerminalWindow:
         )
         self.terminal.connect("commit", self._on_commit)
         self.terminal.connect("size-allocate", self._on_size_allocate)
+        self.terminal.connect("key-press-event", self._on_key_press)
+        self.terminal.connect("button-press-event", self._on_button_press)
+        self._context_menu = None  # kept alive while it is shown
         self.window.connect("destroy", self._on_destroy)
         self.window.show_all()
         self.terminal.grab_focus()
@@ -839,6 +843,56 @@ class TerminalWindow:
 
     def _on_size_allocate(self, terminal, _allocation):
         self.session.resize(terminal.get_column_count(), terminal.get_row_count())
+
+    def copy(self, *_args):
+        """Copies the selection, if any, to the clipboard."""
+        if self.terminal.get_has_selection():
+            self.terminal.copy_clipboard_format(Vte.Format.TEXT)
+
+    def paste(self, *_args):
+        """Pastes the clipboard into the shell (it comes back via "commit")."""
+        self.terminal.paste_clipboard()
+
+    def select_all(self, *_args):
+        self.terminal.select_all()
+
+    def _on_key_press(self, _terminal, event):
+        # Ctrl+Shift+C/V as in GNOME Terminal: plain Ctrl+C/V go to the shell.
+        modifiers = event.state & Gtk.accelerator_get_default_mod_mask()
+        if modifiers != Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK:
+            return False
+        key = Gdk.keyval_to_lower(event.keyval)
+        if key == Gdk.KEY_c:
+            self.copy()
+        elif key == Gdk.KEY_v:
+            self.paste()
+        elif key == Gdk.KEY_a:
+            self.select_all()
+        else:
+            return False
+        return True
+
+    def _on_button_press(self, _terminal, event):
+        if (
+            event.type != Gdk.EventType.BUTTON_PRESS
+            or event.button != Gdk.BUTTON_SECONDARY
+        ):
+            return False
+        menu = Gtk.Menu()
+        for label, action, sensitive in (
+            ("Copy", self.copy, self.terminal.get_has_selection()),
+            ("Paste", self.paste, True),
+            ("Select All", self.select_all, True),
+        ):
+            item = Gtk.MenuItem(label=label)
+            item.set_sensitive(sensitive)
+            item.connect("activate", action)
+            menu.append(item)
+        menu.show_all()
+        menu.attach_to_widget(self.terminal, None)
+        menu.popup_at_pointer(event)
+        self._context_menu = menu
+        return True
 
     def _on_destroy(self, _window):
         self._destroyed = True
