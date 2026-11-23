@@ -663,6 +663,13 @@ class IconTest(IndicatorTestCase):
         # The panel recolors *-symbolic icons to its text color.
         self.assertTrue(ind.ICON_NORMAL_NAME.endswith("-symbolic"))
 
+    def test_svg_root_element_starts_early(self):
+        # GTK and GNOME Shell sniff the first 256 bytes for "<svg"; past that
+        # the symbolic icon fails to load and the panel shows "...".
+        for path in (ind.ICON_NORMAL_FILE, ind.ICON_ALERT):
+            with open(path, "rb") as f:
+                self.assertIn(b"<svg", f.read(256), path)
+
     def test_symbolic_icon_is_named_when_the_theme_is_built(self):
         with mock.patch.object(ind.os.path, "isfile", return_value=True):
             app = self.make_app(FakeServers({LOCAL: []}))
