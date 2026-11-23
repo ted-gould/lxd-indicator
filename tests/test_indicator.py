@@ -658,19 +658,27 @@ class IconTest(IndicatorTestCase):
         self.app._current_icon = None
 
     def test_icon_files_exist(self):
-        self.assertTrue(os.path.isfile(ind.ICON_NORMAL))
+        self.assertTrue(os.path.isfile(ind.ICON_NORMAL_FILE))
         self.assertTrue(os.path.isfile(ind.ICON_ALERT))
+        # The panel recolors *-symbolic icons to its text color.
+        self.assertTrue(ind.ICON_NORMAL_NAME.endswith("-symbolic"))
 
-    def test_symbolic_icon_is_passed_as_a_file_path(self):
-        # A path, as for the alert icon: the panel needn't search for it.
-        self.assertTrue(os.path.isabs(ind.ICON_NORMAL))
-        # The panel recolors files named *-symbolic.svg to its text color.
-        self.assertTrue(ind.ICON_NORMAL.endswith("-symbolic.svg"))
-        app = self.make_app(FakeServers({LOCAL: []}))
+    def test_symbolic_icon_is_named_when_the_theme_is_built(self):
+        with mock.patch.object(ind.os.path, "isfile", return_value=True):
+            app = self.make_app(FakeServers({LOCAL: []}))
+        app.indicator.set_icon_theme_path.assert_called_once_with(ind.ICON_THEME_DIR)
+        app._current_icon = None
+        app._update_icon()
+        app.indicator.set_icon_full.assert_called_with(ind.ICON_NORMAL_NAME, "LXD")
+
+    def test_symbolic_icon_is_a_path_without_the_theme(self):
+        # A source checkout: no index.theme, so the panel couldn't find a name.
+        with mock.patch.object(ind.os.path, "isfile", return_value=False):
+            app = self.make_app(FakeServers({LOCAL: []}))
         app.indicator.set_icon_theme_path.assert_not_called()
         app._current_icon = None
         app._update_icon()
-        app.indicator.set_icon_full.assert_called_with(ind.ICON_NORMAL, "LXD")
+        app.indicator.set_icon_full.assert_called_with(ind.ICON_NORMAL_FILE, "LXD")
 
     def test_alert_icon_when_lxd_unavailable(self):
         self.app.lxd_client = None
