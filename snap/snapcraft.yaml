@@ -68,6 +68,9 @@ parts:
     source: .
     build-packages:
       - python3-pip
+      # The panel icon's theme: hicolor's index.theme, and the cache tool.
+      - hicolor-icon-theme
+      - gtk-update-icon-cache
     stage-packages:
       # core24 has no usable Python, but its package list still names the
       # interpreter packages, so snapcraft drops them when they're only
@@ -104,3 +107,10 @@ parts:
       for icon in lxd_logo.svg icons/hicolor/scalable/apps/lxd-indicator-symbolic.svg; do
         install -D -m 644 "$icon" "$CRAFT_PART_INSTALL/$icon"
       done
+      # Make $SNAP/icons/hicolor a real icon theme. The panel looks the icon
+      # up by name in $SNAP/icons and finds nothing there without an
+      # index.theme. The cache tool refuses a directory without one, so it
+      # also checks the theme is complete.
+      theme="$CRAFT_PART_INSTALL/icons/hicolor"
+      install -m 644 /usr/share/icons/hicolor/index.theme "$theme/index.theme"
+      env -u LD_LIBRARY_PATH /usr/bin/gtk-update-icon-cache --force "$theme"
